@@ -1,0 +1,20 @@
+  create_surface_1280x800_context.bin: cmdId 0x0009
+  wts1_576x128_nscodec_subregion.bin: flags=0x00 residual=0 bands=0 subcodecs=28916
+    subcodec NSCodec at (0,0) 576x128 bytes=28903 ColorLossLevel=3 ChromaSubsamplingLevel=0
+  wts1_64x32_taskbar_strip.bin: flags=0x00 residual=0 bands=0 subcodecs=21
+    subcodec RLEX at (0,0) 64x32 bytes=8
+  wts1_64x64_clearcodec_tile.bin: flags=0x00 residual=0 bands=0 subcodecs=279
+    subcodec RLEX at (0,0) 64x64 bytes=266
+  wts1_8x4_micro_tile.bin: flags=0x01 residual=0 bands=39 subcodecs=0
+  wts2_37x560_diff_column_9tiles.bin: region flags=0x01 tiles=9 quant_tables=1 prog_quant=0
+    quant[0] = {'LL3': 6, 'HL3': 6, 'LH3': 6, 'HH3': 7, 'HL2': 8, 'LH2': 8, 'HH2': 9, 'HL1': 9, 'LH1': 9, 'HH1': 10}
+    (quantIdxY, quantIdxCb, quantIdxCr) usage: {(0, 0, 0): 9}; quality bytes: [255]
+  wts2_64x128_diff_3tiles.bin: region flags=0x01 tiles=3 quant_tables=1 prog_quant=0
+    quant[0] = {'LL3': 6, 'HL3': 6, 'LH3': 6, 'HH3': 7, 'HL2': 8, 'LH2': 8, 'HH2': 9, 'HL1': 9, 'LH1': 9, 'HH1': 10}
+    (quantIdxY, quantIdxCb, quantIdxCr) usage: {(0, 0, 0): 3}; quality bytes: [255]
+  wts2_64x64_diff_2tiles.bin: region flags=0x01 tiles=2 quant_tables=1 prog_quant=0
+    quant[0] = {'LL3': 6, 'HL3': 6, 'LH3': 6, 'HH3': 7, 'HL2': 8, 'LH2': 8, 'HH2': 9, 'HL1': 9, 'LH1': 9, 'HH1': 10}
+    (quantIdxY, quantIdxCb, quantIdxCr) usage: {(0, 0, 0): 2}; quality bytes: [255]
+  wts2_progressive_tile_first_mixed_25tiles.bin: region flags=0x01 tiles=25 quant_tables=1 prog_quant=1
+    quant[0] = {'LL3': 6, 'HL3': 6, 'LH3': 6, 'HH3': 7, 'HL2': 8, 'LH2': 8, 'HH2': 9, 'HL1': 9, 'LH1': 9, 'HH1': 10}
+    (quantIdxY, quantIdxCb, quantIdxCr) usage: {(0, 0, 0): 25}; quality bytes: [0]

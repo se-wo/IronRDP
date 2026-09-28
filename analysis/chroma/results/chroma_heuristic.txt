@@ -1,0 +1,13 @@
+image,flagged_blocks,total_blocks
+chroma_checker,160,160
+cleartype_text,0,160
+gradient,15,160
+lines_1px,119,160
+solid_patches,28,160
+text_000080,73,160
+text_0000ff,89,160
+text_00ff00,0,160
+text_800000,77,160
+text_ff0000,90,160
+text_ffffff,0,160
+# 1920x1088 full frame, scalar, single thread: 14.76 ms per frame (8160 blocks)
