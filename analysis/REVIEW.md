@@ -246,7 +246,7 @@ Jeder Befund nennt Kategorie, Schwere, Status (F/H/U), Beleg, Upstream-Status un
 
 #### C-06 Client-AVC420 ignoriert `regionRects` und schneidet ab dem Ursprung
 
-- **Kategorie:** Spec-Konformität, Mixed Frames. **Schwere:** hoch. **Status:** F (Code); Auswirkung gegen Windows H.
+- **Kategorie:** Spec-Konformität, Mixed Frames. **Schwere:** hoch. **Status:** F (Code und Test); Auswirkung gegen Windows H.
 - **Beleg:**
   - `decode_avc420` (`client.rs:961-1006`) dekodiert den Frame und kopiert `crop_decoded_frame(frame, dest_w, dest_h)` (`:993`, Funktion `:1265-1300`). Dabei werden immer die Zeilen und Spalten ab (0,0) des H.264-Frames genommen.
   - Das Ergebnis landet vollflächig auf `destRect`. Die `regionRects` aus `Avc420BitmapStream` werden gelesen, aber nicht angewandt.
@@ -257,11 +257,15 @@ Jeder Befund nennt Kategorie, Schwere, Status (F/H/U), Beleg, Upstream-Status un
   - Pixel im Bounding-Rect, aber außerhalb der Regionen, werden überschrieben. In Mixed Frames trifft das ClearCodec-Kacheln, sobald AVC später in der PDU-Folge steht.
   - IronRDPs eigener Server erzeugt genau solche Bounding-Rects (`compute_dest_rect`, `server.rs:1405-1433`).
 - **Upstream:** kein Issue gefunden (Suche „AVC420 regionRects destination rectangle crop offset“).
-- **Vorschlag:** Den Frame in Surface-Koordinaten behandeln und je Region-Rect den Ausschnitt (left, top, right, bottom) kopieren. Test mit einem Region-Rect ungleich Ursprung. Aufwand S.
+- **Test:** `chroma/harness/tests/c06_avc420_region_rects.rs` verbindet IronRDPs Server (`send_avc420_frame`) mit IronRDPs Client (OpenH264-Decoder) und prüft den komponierten Output.
+  - Kontrolle (eine Region über die ganze Surface): besteht, Mittelwert 235,9.
+  - Region (32,32)–(64,64) mit weißem Quadranten an genau dieser Stelle im Frame: **schlägt fehl**, die Surface zeigt Mittelwert 16,0 (Schwarz aus der linken oberen Frame-Ecke).
+  - Zwei Regionen in gegenüberliegenden Ecken: **schlägt fehl**, Pixel (32,32) liegt außerhalb beider Regionen und wird von ClearCodec-Blau `[0,0,255]` zu `[236,236,236]` überschrieben.
+- **Vorschlag:** Den Frame in Surface-Koordinaten behandeln und je Region-Rect den Ausschnitt (left, top, right, bottom) kopieren. Die beiden Tests dienen als Regressionstests. Aufwand S.
 
 #### C-07 Progressive: DWT im 8-Bit-Ganzzahlbereich, nicht verlustfrei erreichbar
 
-- **Kategorie:** Codec-Präzision. **Schwere:** hoch (Qualität), mittel (Interop). **Status:** F (Messung); Decoder-Auswirkung auf Windows-Streams H.
+- **Kategorie:** Codec-Präzision. **Schwere:** hoch (Qualität), mittel (Interop). **Status:** F (Messung und Test); Decoder-Auswirkung mit synthetischen Windows-artigen Streams F, mit echten Captures offen.
 - **Beleg:**
   - `rgba_to_ycbcr` erzeugt ganzzahlige Werte in [−128, 127] ohne Nachkommabits (`progressive.rs:546-548`). Die DWT läuft darauf (`:377-381`).
   - Die Spec-DWT (MS-RDPRFX 3.1.8.1.4, Abb. 6: H[n] = ⌊(X[2n+1] − ⌊(X[2n]+X[2n+2])/2⌋)/2⌋) verwirft pro Stufe das LSB des Hochpasses und ist bei Ganzzahlpräzision prinzipiell verlustbehaftet.
@@ -274,7 +278,12 @@ Jeder Befund nennt Kategorie, Schwere, Status (F/H/U), Beleg, Upstream-Status un
   - Progressive mit feinster Basis-Quantisierung (q = 6) und vollem Pass: max. Fehler 26 (rot), PSNR V 41,6 dB.
   - Die Upgrade-Passes für Chroma können deshalb nie verlustfrei werden.
   - Die Windows-Captures nutzen Reduce-Extrapolate (REGION flags 0x01, T9); dort liegt der Fehler bei 11 bis 14 (T1 `_re`).
-  - Da der Decoder in denselben 8-Bit-Bereich dequantisiert, dürften auch Windows-Progressive-Streams im IronRDP-Client ungenauer rekonstruiert werden als in FreeRDP [H].
+  - Decoderseite (Test `chroma/harness/tests/c07_progressive_decoder_precision.rs`): Koeffizienten, wie Windows und FreeRDP sie erzeugen (11.5-Festkomma, gerundet durch 2^5 bei q = 6, eine TILE_SIMPLE), dekodiert IronRDP mit **4 bis 8 Stufen** Abweichung von einer 11.5-Referenzdekodierung derselben Koeffizienten.
+    - rote Striche mit Reduce-Extrapolate: 7 (Referenz gegen Original 6, IronRDP gegen Original 8)
+    - rote Striche mit Standard-DWT: 8 (IronRDP gegen Original 12)
+    - glatter Verlauf mit Reduce-Extrapolate: 4
+
+    Einschränkungen: Die Referenz nutzt IronRDPs eigene DWT-Funktionen im 11.5-Bereich, nicht FreeRDPs Decoder. Der Stream ist synthetisch, kein echter Capture. Die Toleranz von 2 Stufen habe ich gesetzt.
 - **Upstream:**
   - kein Issue gefunden
   - #1400 (geschlossen, nicht gemergt) betraf eine andere Farbskalierung
@@ -355,6 +364,7 @@ Jeder Befund nennt Kategorie, Schwere, Status (F/H/U), Beleg, Upstream-Status un
   - `QuantQuality::encode` ruft `set_bits(0..6, qp)` auf (`pdu/avc.rs:45`). `bit_field` 0.10.3 asserted „value does not fit into bit range“ (`lib.rs:264-267`), also **Panic bei qp ≥ 64**, ausgelöst durch einen öffentlichen `u8` über `send_avc420_frame` → `encode_avc420_bitmap_stream(...).expect(...)` (`avc.rs:587-589`).
   - qp 52 bis 63 (für H.264 ungültig) wird kommentarlos gesendet.
 - **Upstream:** keins gefunden.
+- **Test:** `chroma/harness/tests/c12_qp_panic.rs`: Kontrolle qp 51 besteht. `encode_avc420_bitmap_stream` und `GraphicsPipelineServer::send_avc420_frame` mit qp 64 **paniken** beide mit „value does not fit into bit range“ (`pdu/avc.rs:45:14`).
 - **Vorschlag:** QP in `Avc420Region::new` auf 0 bis 51 klemmen oder validieren. `EncodeParams { qp, roi }` im Encoder-Trait. Aufwand S.
 
 #### C-13 Farbkonsistenz über Codecs (Mixed Frames)

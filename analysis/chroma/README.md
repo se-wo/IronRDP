@@ -13,6 +13,7 @@ Der Bericht dazu liegt in [`../REVIEW.md`](../REVIEW.md).
 | `inspect_windows_fixtures.py` | liest Windows-Server-2025-Captures (Haven-Fixtures im Testsuite-Crate) aus: NSCodec-CLL, Progressive-Quant-Tabellen |
 | `metrics.py` | PSNR Y/U/V, SSIM, CIEDE2000, Kantenmaße; Differenzbilder |
 | `make_tables.py` | rendert `results/tables.md` |
+| `harness/tests/` | Tests, die das spec-konforme Verhalten verlangen und heute **fehlschlagen**: `c06_avc420_region_rects.rs`, `c07_progressive_decoder_precision.rs`, `c12_qp_panic.rs` (Kontrolltests bestehen). Ausführen mit `cd harness && cargo test --release -- --nocapture` |
 
 ## Reproduktion
 
