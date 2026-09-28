@@ -1,17 +1,18 @@
-**Title:** egfx: send_avc420_frame panics when an Avc420Region QP does not fit in 6 bits
+**Title:** egfx server: sending an H.264 frame with a quantization parameter ≥ 64 panics
 
 ---
 
-`Avc420Region::quantization_parameter` is a public `u8`. `QuantQuality::encode` packs it with `set_bits(0..6, qp)` ([`avc.rs#L45`](https://github.com/Devolutions/IronRDP/blob/8d91a2cc3a3fa04f2537cad87e7065604789f784/crates/ironrdp-egfx/src/pdu/avc.rs#L45)). `bit_field` asserts "value does not fit into bit range" for values ≥ 64, and `encode_avc420_bitmap_stream` wraps the encode in `.expect(...)` ([`#L587-L589`](https://github.com/Devolutions/IronRDP/blob/8d91a2cc3a3fa04f2537cad87e7065604789f784/crates/ironrdp-egfx/src/pdu/avc.rs#L587-L589)).
+### What goes wrong
 
-As a result, an out-of-range QP passed by the embedder panics the server:
+A server application that passes an H.264 quantization parameter (QP) of 64 or more to `send_avc420_frame` crashes with a panic. It does not get an error. A mistyped or unclamped value in the embedding application is enough.
 
-- confirmed with a test: `encode_avc420_bitmap_stream` and `send_avc420_frame` on a negotiated server
-- from reading the code, the same packing path: the AVC444 senders and `send_mixed_frame`
+Values from 52 to 63 do not panic but are also invalid: H.264 only allows QP 0 to 51. IronRDP sends them to the client unchanged.
 
-QP values 52..=63 do not panic, but they are sent unchanged. MS-RDPEGFX 2.2.4.4.2 says qp "MUST be in the range required by [ITU-H.264-201201] sections 7.4.2.1.1 and 7.4.3 for high profiles".
+### Why
 
-### Reproduction
+The QP is a public `u8` in `Avc420Region`. On the wire it has only 6 bits. IronRDP writes it with `bit_field`'s `set_bits(0..6, qp)`, which asserts that the value fits, and the caller wraps the result in `.expect(...)`. Nothing checks the range before.
+
+### How to reproduce
 
 ```rust
 use ironrdp_egfx::pdu::{Avc420Region, encode_avc420_bitmap_stream};
@@ -21,9 +22,16 @@ let _ = encode_avc420_bitmap_stream(&[Avc420Region::new(0, 0, 16, 16, 64, 100)],
 // value does not fit into bit range
 ```
 
+I also confirmed it through `GraphicsPipelineServer::send_avc420_frame` on a negotiated server. From reading the code, the AVC444 senders and `send_mixed_frame` go through the same path.
+
+### References
+
+- MS-RDPEGFX 2.2.4.4.2: qp "MUST be in the range required by [ITU-H.264-201201] sections 7.4.2.1.1 and 7.4.3 for high profiles".
+- [`avc.rs#L45`](https://github.com/Devolutions/IronRDP/blob/8d91a2cc3a3fa04f2537cad87e7065604789f784/crates/ironrdp-egfx/src/pdu/avc.rs#L45) (`set_bits(0..6, …)`), [`avc.rs#L587-L589`](https://github.com/Devolutions/IronRDP/blob/8d91a2cc3a3fa04f2537cad87e7065604789f784/crates/ironrdp-egfx/src/pdu/avc.rs#L587-L589) (`.expect(...)`).
+
 ### Suggested fix
 
-Validate the QP (0..=51) in `Avc420Region::new` / `full_frame`, or reject the frame in the `send_*` methods (they already return `Option`). Clamping would also avoid the panic, but it silently changes what the embedder asked for.
+Check the QP (0..=51) when the region is built, or reject the frame in the `send_*` methods, which already return `Option`. Clamping would also avoid the panic, but it silently changes what the application asked for.
 
 > [!NOTE]
 > Human-reviewed, LLM-assisted content.

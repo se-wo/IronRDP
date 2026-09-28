@@ -1,27 +1,34 @@
-**Title:** progressive: DWT variant is read from the CONTEXT flags instead of the REGION flags
+**Title:** Progressive: tiles can decode garbled because the wavelet variant is read from the wrong flag
 
 ---
 
-`ProgressiveDecoder::decode_bitmap` chooses between the standard and the reduce-extrapolate DWT from bit 0 of the `RFX_PROGRESSIVE_CONTEXT` flags ([`progressive.rs#L1358-L1373`](https://github.com/Devolutions/IronRDP/blob/8d91a2cc3a3fa04f2537cad87e7065604789f784/crates/ironrdp-graphics/src/progressive.rs#L1358-L1373), via [`ProgressiveContextPdu::uses_reduce_extrapolate`](https://github.com/Devolutions/IronRDP/blob/8d91a2cc3a3fa04f2537cad87e7065604789f784/crates/ironrdp-pdu/src/codecs/rfx/progressive.rs#L397-L413)).
+### What goes wrong
 
-MS-RDPEGFX gives bit 0 a different meaning in each block:
+IronRDP's RemoteFX Progressive decoder can undo the wavelet transform with the wrong method. The decoded tiles are then garbled: colours and shapes are wrong, not just slightly blurry.
 
-- 2.2.4.2.1.4 `RFX_PROGRESSIVE_CONTEXT`: `RFX_SUBBAND_DIFFING` (0x01), "Indicates that sub-band diffing is enabled."
-- 2.2.4.2.1.5 `RFX_PROGRESSIVE_REGION`: `RFX_DWT_REDUCE_EXTRAPOLATE` (0x01), "Indicates that the discrete wavelet transform (DWT) uses the "Reduce-Extrapolate" method."
+This only happens when a server sets two particular flags to different values. With the servers I could check, both flags have the same value, so the bug stays hidden. It is still wrong according to the spec, and it takes only a small difference in server behaviour to trigger it.
 
-`ProgressiveRegion::uses_reduce_extrapolate` exists ([`#L792-L795`](https://github.com/Devolutions/IronRDP/blob/8d91a2cc3a3fa04f2537cad87e7065604789f784/crates/ironrdp-pdu/src/codecs/rfx/progressive.rs#L792-L795)) but does not affect decoding. FreeRDP reads each flag from its own block ([`progressive.c#L958-L959`](https://github.com/FreeRDP/FreeRDP/blob/dca5e65158ea2f716ced5d38b526ed1c94a89b9c/libfreerdp/codec/progressive.c#L958-L959)):
+*(Screenshot: left IronRDP, middle FreeRDP, right the difference ×8, same input stream.)*
 
-```c
-sub = context->flags & RFX_SUBBAND_DIFFING;
-extrapolate = region->flags & RFX_DWT_REDUCE_EXTRAPOLATE;
-```
+### Why
 
-### Reproduction
+RemoteFX Progressive has two variants of the wavelet transform, "standard" and "reduce-extrapolate". The stream tells the decoder which one it used:
 
-Take the 16 non-difference tiles of `wts2_progressive_tile_first_mixed_25tiles.bin` (Windows capture, REGION flags = 0x01), put SYNC + CONTEXT in front, and decode twice, once with CONTEXT flags 0x01 and once with 0x00. Non-difference tiles must decode identically. They don't: the two outputs differ by up to 253 per channel.
-FreeRDP 3.32.2 `progressive_decompress` returns the same image for both streams. Compared with that image, IronRDP's output is within 4 levels for CONTEXT flags 0x01 and off by 69 levels on average for 0x00.
+- **Where the spec puts it:** in every REGION block, bit 0 of `flags` (`RFX_DWT_REDUCE_EXTRAPOLATE`).
+- **Where IronRDP looks:** in the CONTEXT block, bit 0 of `flags`. The spec defines that bit as something unrelated: "sub-band diffing is enabled" (`RFX_SUBBAND_DIFFING`).
 
-Test for `ironrdp-testsuite-core/tests/egfx/wire_to_surface_real_world.rs` (fails on current master):
+So IronRDP decodes correctly only while a server happens to set both bits to the same value.
+
+### How to reproduce
+
+Take the Windows capture that is already in the test data (`wts2_progressive_tile_first_mixed_25tiles.bin`; its REGION says "reduce-extrapolate"). Decode its 16 normal tiles twice. The only difference between the two runs is the CONTEXT bit, which has nothing to do with the wavelet variant.
+
+| | CONTEXT bit = 1 | CONTEXT bit = 0 |
+|---|---|---|
+| FreeRDP 3.32.2 | correct image | same correct image |
+| IronRDP | matches FreeRDP within 4 levels | differs by 69 levels on average, up to 253 |
+
+Test for `ironrdp-testsuite-core/tests/egfx/wire_to_surface_real_world.rs`. It fails on current master:
 
 ```rust
 #[test]
@@ -75,17 +82,22 @@ fn progressive_dwt_variant_comes_from_region_flags() {
 }
 ```
 
-### When it matters
+### Which servers are affected
 
-Decoding only goes wrong when a server sets the two bits differently.
+- **FreeRDP:** writes 0 into both flags ([`rfx.c#L2300`](https://github.com/FreeRDP/FreeRDP/blob/dca5e65158ea2f716ced5d38b526ed1c94a89b9c/libfreerdp/codec/rfx.c#L2300), [`#L2338`](https://github.com/FreeRDP/FreeRDP/blob/dca5e65158ea2f716ced5d38b526ed1c94a89b9c/libfreerdp/codec/rfx.c#L2338)). Decodes correctly by coincidence.
+- **Windows:** The capture does not contain the CONTEXT block, so I don't know its value. If Windows turns on sub-band diffing together with reduce-extrapolate, it also decodes correctly by coincidence.
+- **xrdp, GNOME Remote Desktop, others:** not checked.
 
-- FreeRDP's encoder writes 0 in both blocks ([`rfx.c#L2300`](https://github.com/FreeRDP/FreeRDP/blob/dca5e65158ea2f716ced5d38b526ed1c94a89b9c/libfreerdp/codec/rfx.c#L2300), [`#L2338`](https://github.com/FreeRDP/FreeRDP/blob/dca5e65158ea2f716ced5d38b526ed1c94a89b9c/libfreerdp/codec/rfx.c#L2338)), so it decodes correctly by coincidence.
-- The Windows capture does not include the CONTEXT block, so I don't know which value Windows sends. If Windows enables sub-band diffing together with reduce-extrapolate, its streams also decode correctly by coincidence.
-- I have not checked xrdp or GNOME Remote Desktop.
+### References
+
+- MS-RDPEGFX 2.2.4.2.1.5 `RFX_PROGRESSIVE_REGION`: `RFX_DWT_REDUCE_EXTRAPOLATE` (0x01), "Indicates that the discrete wavelet transform (DWT) uses the "Reduce-Extrapolate" method."
+- MS-RDPEGFX 2.2.4.2.1.4 `RFX_PROGRESSIVE_CONTEXT`: `RFX_SUBBAND_DIFFING` (0x01), "Indicates that sub-band diffing is enabled."
+- IronRDP picks the variant from the CONTEXT flags: [`progressive.rs#L1358-L1373`](https://github.com/Devolutions/IronRDP/blob/8d91a2cc3a3fa04f2537cad87e7065604789f784/crates/ironrdp-graphics/src/progressive.rs#L1358-L1373), via [`ProgressiveContextPdu::uses_reduce_extrapolate`](https://github.com/Devolutions/IronRDP/blob/8d91a2cc3a3fa04f2537cad87e7065604789f784/crates/ironrdp-pdu/src/codecs/rfx/progressive.rs#L397-L413). The REGION flag is parsed ([`ProgressiveRegion::uses_reduce_extrapolate`](https://github.com/Devolutions/IronRDP/blob/8d91a2cc3a3fa04f2537cad87e7065604789f784/crates/ironrdp-pdu/src/codecs/rfx/progressive.rs#L792-L795)) but never used.
+- FreeRDP reads each flag from its own block ([`progressive.c#L958-L959`](https://github.com/FreeRDP/FreeRDP/blob/dca5e65158ea2f716ced5d38b526ed1c94a89b9c/libfreerdp/codec/progressive.c#L958-L959)): `sub = context->flags & RFX_SUBBAND_DIFFING; extrapolate = region->flags & RFX_DWT_REDUCE_EXTRAPOLATE;`
 
 ### Suggested fix
 
-Take the DWT variant from each REGION (`region.uses_reduce_extrapolate()`) and treat the CONTEXT bit as sub-band diffing. The stored CONTEXT value and its fallbacks would then no longer be needed for the DWT choice.
+Take the wavelet variant from each REGION (`region.uses_reduce_extrapolate()`). Treat the CONTEXT bit as what it is, sub-band diffing. The stored CONTEXT value and its fallbacks are then no longer needed for this decision.
 
 > [!NOTE]
 > Human-reviewed, LLM-assisted content.
