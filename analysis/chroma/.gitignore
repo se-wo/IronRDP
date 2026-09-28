@@ -6,3 +6,5 @@ results/avc_planes/
 results/work/
 harness/target/
 __pycache__/
+results/progressive_fixture/*.rgba
+results/progressive_fixture/*.bin

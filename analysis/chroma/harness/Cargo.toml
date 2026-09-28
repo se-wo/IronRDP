@@ -3,6 +3,7 @@ name = "chroma-harness"
 version = "0.0.0"
 edition = "2024"
 publish = false
+default-run = "chroma-harness"
 description = "Analysis-only codec round-trip harness (not part of the IronRDP workspace)"
 
 # Standalone workspace so the IronRDP root Cargo.toml stays untouched.

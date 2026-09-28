@@ -45,6 +45,8 @@ Analyse, Phase 1 (nur lesen und messen, kein Produktcode geändert). Stand: 28.0
 | 9 | C-10 | mittel | Keine Klassifikation oder Routing-Schnittstelle. AVC444 fehlt in Mixed Frames (offener PR #2002). `AVC_THINCLIENT` („bevorzugt AVC444“) wird ignoriert. AVC444-Sendeversuche scheitern still. |
 | 10 | A-01 | mittel | Core-Tier-Invarianten verletzt: kein `no_std` in pdu, graphics, egfx, session, connector; `Instant::now()` im EGFX-Server; `arithmetic_side_effects` in graphics global erlaubt. |
 
+Zusätzlich gefunden bei der Plausibilitätsprüfung: **C-16** (mittel, latent). Der Progressive-Decoder liest Reduce-Extrapolate aus dem CONTEXT- statt aus dem REGION-Flag.
+
 ### Empfehlung in einem Satz
 
 Zuerst den AVC-Farbraum reparieren. Dann AVC444 mit einer planaren Encoder-Schnittstelle und einem Split-Helfer bauen. Parallel farbigen Text per Routing-Hook auf den bit-exakten ClearCodec legen. Details in Abschnitt 7.
@@ -284,6 +286,11 @@ Jeder Befund nennt Kategorie, Schwere, Status (F/H/U), Beleg, Upstream-Status un
     - glatter Verlauf mit Reduce-Extrapolate: 4
 
     Einschränkungen: Die Referenz nutzt IronRDPs eigene DWT-Funktionen im 11.5-Bereich, nicht FreeRDPs Decoder. Der Stream ist synthetisch, kein echter Capture. Die Toleranz von 2 Stufen habe ich gesetzt.
+  - Plausibilitätsprüfung mit dem echten Windows-Capture (`chroma/harness/src/bin/progressive_fixture.rs`, `chroma/progressive_fixture_compare.py`, Ergebnis `chroma/results/progressive_fixture/summary.txt`): Die 16 Basiskacheln aus `wts2_progressive_tile_first_mixed_25tiles.bin` wurden mit IronRDP, mit FreeRDP 3.32.2 (`progressive_decompress`) und mit der 11.5-Referenz dekodiert, 31 424 Pixel.
+    - IronRDP gegen FreeRDP: max. 4, Mittel 0,66, 3,3 % der Pixel weichen um mehr als 2 ab.
+    - 11.5-Referenz gegen FreeRDP: max. 1, Mittel 0,045.
+
+    Die Referenz trifft FreeRDP also fast exakt, die Abweichung von IronRDP erklärt sich durch die 8-Bit-Rekonstruktion. Die Richtung der Hypothese ist damit bestätigt; das Ausmaß ist auf diesem Inhalt klein (glatte UI-Fläche, Qualitätsstufe 0). Ohne Originalbild bleibt es ein Vergleich zwischen Decodern.
 - **Upstream:**
   - kein Issue gefunden
   - #1400 (geschlossen, nicht gemergt) betraf eine andere Farbskalierung
@@ -396,6 +403,21 @@ Jeder Befund nennt Kategorie, Schwere, Status (F/H/U), Beleg, Upstream-Status un
   - Progressive von Windows: **eine** Quant-Tabelle für Y, Cb und Cr (6,6,6,7,8,8,9,9,9,10), Reduce-Extrapolate, Qualität 255 bzw. 0.
 - **Folge:** Selbst Microsofts „verlustfreier“ ClearCodec-Pfad verliert bei farbigem, texturiertem Inhalt Chroma (CLL 3 ≈ max. Fehler 5 bis 6, C-09). Chroma wird bei Progressive nicht gröber quantisiert als Luma, das gilt für Windows wie für IronRDP.
 - **Chance:** IronRDPs ClearCodec-Encoder ist bit-exakt (T1, T7) und damit ein Hebel für „besser als Microsoft“.
+
+#### C-16 Progressive-Decoder liest Reduce-Extrapolate aus dem falschen Flag
+
+- **Kategorie:** Spec-Konformität, Interop. **Schwere:** mittel (latent). **Status:** F (Spec, Code, FreeRDP, Test mit Windows-Capture); Auftreten in der Praxis H.
+- **Beleg:**
+  - `ProgressiveDecoder::decode_bitmap` entnimmt die DWT-Variante dem CONTEXT-Block (`ironrdp-graphics/src/progressive.rs:1358-1373` über `ProgressiveContextPdu::uses_reduce_extrapolate`, `ironrdp-pdu/src/codecs/rfx/progressive.rs:397-413`). Das REGION-Flag wird zwar geparst (`:792-795`), steuert die Dekodierung aber nicht.
+  - Laut Spec ist Bit 0 im CONTEXT `RFX_SUBBAND_DIFFING` (MS-RDPEGFX 2.2.4.2.1.4) und Bit 0 in der REGION `RFX_DWT_REDUCE_EXTRAPOLATE` (2.2.4.2.1.5).
+  - FreeRDP macht es spec-konform: `sub = context->flags & RFX_SUBBAND_DIFFING; extrapolate = region->flags & RFX_DWT_REDUCE_EXTRAPOLATE;` (`progressive.c:958-959,1374-1375`).
+- **Test** (`chroma/harness/tests/c16_progressive_reduce_extrapolate_flag.rs`): Die 16 Basiskacheln des Windows-Captures (REGION-Flag 0x01) wurden einmal mit CONTEXT-Flag 0x01 und einmal mit 0x00 dekodiert. Das Ergebnis darf sich nicht unterscheiden, weicht aber um bis zu **253** ab. FreeRDP liefert in beiden Fällen dasselbe korrekte Bild; IronRDP liefert mit CONTEXT 0 grobe Artefakte (mittlere Abweichung 69, `results/progressive_fixture/zoom_ctx0.png`).
+- **Wann es passiert:** Falsch dekodiert wird nur, wenn beide Bits verschieden sind.
+  - FreeRDPs Encoder schreibt beide als 0 (`rfx.c:2300` und der Region-Writer), das passt zufällig.
+  - Für Windows ist das CONTEXT-Flag im Capture nicht enthalten. Wegen der Differenz-Kacheln ist `RFX_SUBBAND_DIFFING` = 1 wahrscheinlich, zusammen mit REGION 0x01 würde es dann ebenfalls zufällig passen [H].
+  - Andere Server (xrdp, GNOME Remote Desktop, Eigenbauten) wurden nicht geprüft.
+- **Upstream:** kein Issue oder PR gefunden (Suche „progressive reduce extrapolate flag context region subband diffing“).
+- **Vorschlag:** Die DWT-Variante pro REGION aus `region.uses_reduce_extrapolate()` nehmen und das CONTEXT-Bit als Subband-Diffing behandeln. Den Test hier als Regressionstest übernehmen. Aufwand S.
 
 ### Teil A: Allgemein
 
@@ -545,7 +567,7 @@ Methodik:
 - Heuristik-Probe (B5): siehe Abschnitt 5.1.
 
 **Nicht durchgeführt:**
-- Gegenprobe mit echten AVC-Captures von Windows Server 2025: Es liegen keine AVC-Fixtures vor.
+- Gegenprobe mit echten AVC-Captures von Windows Server 2025: Es liegen keine AVC-Fixtures vor. Für Progressive gibt es einen Decoder-Vergleich mit einem Windows-Capture (C-07, C-16).
 - Dekodierung derselben Streams mit einem Microsoft-Client: nicht verfügbar.
 - Klassisches RFX durch FreeRDP: Das Harness erzeugt nur Kachel-Komponenten, keine vollständige RFX-Nachricht.
 

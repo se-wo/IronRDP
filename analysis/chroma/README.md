@@ -13,7 +13,8 @@ Der Bericht dazu liegt in [`../REVIEW.md`](../REVIEW.md).
 | `inspect_windows_fixtures.py` | liest Windows-Server-2025-Captures (Haven-Fixtures im Testsuite-Crate) aus: NSCodec-CLL, Progressive-Quant-Tabellen |
 | `metrics.py` | PSNR Y/U/V, SSIM, CIEDE2000, Kantenmaße; Differenzbilder |
 | `make_tables.py` | rendert `results/tables.md` |
-| `harness/tests/` | Tests, die das spec-konforme Verhalten verlangen und heute **fehlschlagen**: `c06_avc420_region_rects.rs`, `c07_progressive_decoder_precision.rs`, `c12_qp_panic.rs` (Kontrolltests bestehen). Ausführen mit `cd harness && cargo test --release -- --nocapture` |
+| `harness/src/bin/progressive_fixture.rs` + `progressive_fixture_compare.py` | Plausibilitätsprüfung am Windows-Progressive-Capture: IronRDP gegen FreeRDP gegen 11.5-Referenz (`cargo run --release --bin progressive_fixture -- ../../.. ../results/progressive_fixture`, danach `FREERDP_CHECK=… python3 progressive_fixture_compare.py`) |
+| `harness/tests/` | Tests, die das spec-konforme Verhalten verlangen und heute **fehlschlagen**: `c06_avc420_region_rects.rs`, `c07_progressive_decoder_precision.rs`, `c12_qp_panic.rs`, `c16_progressive_reduce_extrapolate_flag.rs` (Kontrolltests bestehen). Ausführen mit `cd harness && cargo test --release -- --nocapture` |
 
 ## Reproduktion
 

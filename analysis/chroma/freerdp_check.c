@@ -11,6 +11,7 @@
  *   freerdp_check nsc <stream> <w> <h> <out.rgba>        (FREERDP_FLIP_VERTICAL, SurfaceBits)
  *   freerdp_check clear <stream> <w> <h> <out.rgba>
  *   freerdp_check planar <stream> <w> <h> <out.rgba>
+ *   freerdp_check progressive <stream> <w> <h> <out.rgba>   (surface 0, one frame)
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -21,6 +22,8 @@
 #include <freerdp/codec/nsc.h>
 #include <freerdp/codec/clear.h>
 #include <freerdp/codec/planar.h>
+#include <freerdp/codec/progressive.h>
+#include <freerdp/codec/region.h>
 
 static BYTE* read_file(const char* path, size_t* len)
 {
@@ -146,6 +149,16 @@ static int codec(int argc, char** argv)
 		CLEAR_CONTEXT* clear = clear_context_new(FALSE);
 		ok = clear_decompress(clear, data, (UINT32)len, w, h, rgba, PIXEL_FORMAT_RGBA32, w * 4, 0, 0,
 		                      w, h, NULL) >= 0;
+	}
+	else if (strcmp(argv[1], "progressive") == 0)
+	{
+		PROGRESSIVE_CONTEXT* progressive = progressive_context_new(FALSE);
+		REGION16 invalid = { 0 };
+		region16_init(&invalid);
+		ok = progressive && progressive_create_surface_context(progressive, 0, w, h) >= 0 &&
+		     progressive_decompress(progressive, data, (UINT32)len, rgba, PIXEL_FORMAT_RGBA32, w * 4, 0,
+		                            0, &invalid, 0, 0) >= 0;
+		region16_uninit(&invalid);
 	}
 	else if (strcmp(argv[1], "planar") == 0)
 	{
