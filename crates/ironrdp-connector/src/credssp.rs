@@ -136,6 +136,9 @@ impl CredsspSequence {
                     return Err(general_err!("smart card configuration missing"));
                 }
             },
+            Credentials::RdsAad(_) => {
+                return Err(general_err!("RDS AAD credentials cannot be used with CredSSP"));
+            }
         };
 
         let server_name = server_name.into_inner();

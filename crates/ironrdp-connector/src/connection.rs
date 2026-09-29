@@ -211,6 +211,12 @@ pub enum ClientConnectorState {
     Credssp {
         selected_protocol: nego::SecurityProtocol,
     },
+    /// RDS AAD Auth, driven by an [`RdsAadSequence`](crate::rdsaad::RdsAadSequence).
+    ///
+    /// Call [`ClientConnector::mark_rdsaad_as_done()`] once the sequence has finished.
+    RdsAad {
+        selected_protocol: nego::SecurityProtocol,
+    },
     BasicSettingsExchangeSendInitial {
         selected_protocol: nego::SecurityProtocol,
     },
@@ -308,6 +314,7 @@ impl State for ClientConnectorState {
             Self::ConnectionInitiationWaitConfirm { .. } => "ConnectionInitiationWaitResponse",
             Self::EnhancedSecurityUpgrade { .. } => "EnhancedSecurityUpgrade",
             Self::Credssp { .. } => "Credssp",
+            Self::RdsAad { .. } => "RdsAad",
             Self::BasicSettingsExchangeSendInitial { .. } => "BasicSettingsExchangeSendInitial",
             Self::BasicSettingsExchangeWaitResponse { .. } => "BasicSettingsExchangeWaitResponse",
             Self::ChannelConnection { .. } => "ChannelConnection",
@@ -450,6 +457,13 @@ impl ClientConnector {
     }
 
     fn enabled_security_protocols(&self) -> ConnectorResult<nego::SecurityProtocol> {
+        // Entra ID credentials only work with RDS AAD Auth. Advertising TLS or CredSSP next to it
+        // would let the server pick a logon path that bypasses the MFA and Conditional Access
+        // checks the access token went through.
+        if let crate::Credentials::RdsAad(_) = &self.config.credentials {
+            return Ok(nego::SecurityProtocol::RDSAAD);
+        }
+
         let mut security_protocol = nego::SecurityProtocol::empty();
 
         if self.config.enable_tls {
@@ -642,6 +656,28 @@ impl ClientConnector {
             .expect("transition to next state");
         debug_assert!(!self.should_perform_credssp());
         assert_eq!(res, Written::Nothing);
+    }
+
+    pub fn should_perform_rdsaad(&self) -> bool {
+        matches!(self.state, ClientConnectorState::RdsAad { .. })
+    }
+
+    /// Advance past [`ClientConnectorState::RdsAad`] once `sequence` has finished.
+    ///
+    /// Fails if the connector is not in [`ClientConnectorState::RdsAad`] or if the server has not
+    /// accepted the RDP Assertion yet.
+    pub fn mark_rdsaad_as_done(&mut self, sequence: &crate::rdsaad::RdsAadSequence) -> ConnectorResult<()> {
+        let ClientConnectorState::RdsAad { selected_protocol } = self.state else {
+            return Err(general_err!("connector is not performing RDS AAD Auth"));
+        };
+
+        if !sequence.is_done() {
+            return Err(general_err!("RDS AAD Auth sequence is not finished"));
+        }
+
+        self.state = ClientConnectorState::BasicSettingsExchangeSendInitial { selected_protocol };
+
+        Ok(())
     }
 
     /// Returns `true` when the server has sent an Initiate Multitransport
@@ -1043,6 +1079,7 @@ impl Sequence for ClientConnector {
             ClientConnectorState::ConnectionInitiationWaitConfirm { .. } => Some(&ironrdp_pdu::X224_HINT),
             ClientConnectorState::EnhancedSecurityUpgrade { .. } => None,
             ClientConnectorState::Credssp { .. } => None,
+            ClientConnectorState::RdsAad { .. } => None,
             ClientConnectorState::BasicSettingsExchangeSendInitial { .. } => None,
             ClientConnectorState::BasicSettingsExchangeWaitResponse { .. } => Some(&ironrdp_pdu::X224_HINT),
             ClientConnectorState::ChannelConnection { channel_connection, .. } => channel_connection.next_pdu_hint(),
@@ -1148,6 +1185,9 @@ impl Sequence for ClientConnector {
                 let next_state = if selected_protocol.is_standard_rdp_security() {
                     debug!("Standard RDP security selected; skipping TLS and CredSSP");
                     ClientConnectorState::BasicSettingsExchangeSendInitial { selected_protocol }
+                } else if selected_protocol.contains(nego::SecurityProtocol::RDSAAD) {
+                    debug!("Begin RDS AAD Auth");
+                    ClientConnectorState::RdsAad { selected_protocol }
                 } else if selected_protocol
                     .intersects(nego::SecurityProtocol::HYBRID | nego::SecurityProtocol::HYBRID_EX)
                 {
@@ -1166,6 +1206,16 @@ impl Sequence for ClientConnector {
                 Written::Nothing,
                 ClientConnectorState::BasicSettingsExchangeSendInitial { selected_protocol },
             ),
+
+            //== RDS AAD Auth ==//
+            // The PDU exchange needs an AAD nonce and a signature from outside the connector, so the
+            // driver runs it with an `RdsAadSequence`. Stepping past it without that sequence would
+            // skip authentication.
+            ClientConnectorState::RdsAad { .. } => {
+                return Err(general_err!(
+                    "RDS AAD Auth must be performed with an RdsAadSequence (see mark_rdsaad_as_done)"
+                ));
+            }
 
             //== Basic Settings Exchange ==//
             // Exchange basic settings including Core Data, Security Data and Network Data.

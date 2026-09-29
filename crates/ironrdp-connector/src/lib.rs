@@ -9,6 +9,7 @@ pub mod connection_activation;
 mod connection_finalization;
 pub mod credssp;
 mod license_exchange;
+pub mod rdsaad;
 mod server_name;
 
 use core::any::Any;
@@ -120,6 +121,11 @@ pub enum Credentials {
         pin: String,
         config: Option<SmartCardIdentity>,
     },
+    /// Microsoft Entra ID access token for RDS AAD Auth ([`rdsaad`]).
+    ///
+    /// Only PROTOCOL_RDSAAD is requested with these credentials, regardless of
+    /// [`Config::enable_tls`] and [`Config::enable_credssp`].
+    RdsAad(rdsaad::RdsAadCredentials),
 }
 
 impl Credentials {
@@ -128,6 +134,7 @@ impl Credentials {
             Self::UsernamePassword { username, .. } if !username.is_empty() => Some(username),
             Self::UsernamePassword { .. } => None,
             Self::SmartCard { .. } => None, // Username is ultimately provided by the smart card certificate.
+            Self::RdsAad(_) => None,        // The server takes the user from the RDP Assertion.
         }
     }
 
@@ -135,6 +142,7 @@ impl Credentials {
         match self {
             Self::UsernamePassword { password, .. } => password,
             Self::SmartCard { pin, .. } => pin,
+            Self::RdsAad(_) => "",
         }
     }
 }
