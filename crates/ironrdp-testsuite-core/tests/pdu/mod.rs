@@ -11,6 +11,7 @@ mod message_channel;
 )]
 mod pointer;
 mod rdp;
+mod rdsaad;
 mod rfx;
 mod slow_path;
 mod x224;
