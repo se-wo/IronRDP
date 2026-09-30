@@ -48,6 +48,7 @@ import math
 import re
 import subprocess
 import sys
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -94,19 +95,25 @@ def encode(main, aux, w, h, qp_main, qp_aux, chroma_req, work: Path):
     """One x264 instance, two frames (main I, aux P), forced per-frame QP."""
     work.mkdir(parents=True, exist_ok=True)
     raw, es, qpf = work / "in.yuv", work / "out.h264", work / "qp.txt"
-    raw.write_bytes(avc.to_i420(*main) + avc.to_i420(*aux))
-    qpf.write_text(f"0 I {qp_main}\n1 P {qp_aux}\n")
-    subprocess.run(
-        [
-            "x264", "--quiet", "--profile", "high", "--preset", "medium", "--qp", str(qp_aux),
-            "--bframes", "0", "--keyint", "1000", "--scenecut", "0", "--ref", "1",
-            # CQP clamps forced QPs to [min, max] of the default I/P/B QPs; ipratio 4 widens that to q-12.
-            "--ipratio", "4.0", "--qpfile", str(qpf), "--chroma-qp-offset", str(chroma_req),
-            "--demuxer", "raw", "--input-csp", "i420", "--input-res", f"{w}x{h}", "--fps", "30",
-            "-o", str(es), str(raw),
-        ],
-        check=True, capture_output=True,
-    )
+    frames_in = avc.to_i420(*main) + avc.to_i420(*aux)
+    qps = f"0 I {qp_main}\n1 P {qp_aux}\n"
+    cmd = [
+        "x264", "--quiet", "--profile", "high", "--preset", "medium", "--qp", str(qp_aux),
+        "--bframes", "0", "--keyint", "1000", "--scenecut", "0", "--ref", "1",
+        # CQP clamps forced QPs to [min, max] of the default I/P/B QPs; ipratio 4 widens that to q-12.
+        "--ipratio", "4.0", "--qpfile", str(qpf), "--chroma-qp-offset", str(chroma_req),
+        "--demuxer", "raw", "--input-csp", "i420", "--input-res", f"{w}x{h}", "--fps", "30",
+        "-o", str(es), str(raw),
+    ]
+    # Reuse a stream from an earlier run only if input, QPs and command line are unchanged.
+    stamp = work / "cmd.txt"
+    fresh = not (es.exists() and raw.exists() and raw.read_bytes() == frames_in and qpf.exists()
+                 and qpf.read_text() == qps and stamp.exists() and stamp.read_text() == " ".join(cmd))
+    if fresh:
+        raw.write_bytes(frames_in)
+        qpf.write_text(qps)
+        subprocess.run(cmd, check=True, capture_output=True)
+        stamp.write_text(" ".join(cmd))
     dec = subprocess.run(
         ["ffmpeg", "-v", "error", "-i", str(es), "-f", "rawvideo", "-pix_fmt", "yuv420p", "-"],
         check=True, capture_output=True,
@@ -138,7 +145,14 @@ def reconstruct(m, a, version, rule, tau=None):
         d = np.abs(mean - rec)
         if rule == "none":
             continue
-        use = {"spec30": d > 30, "freerdp30": d >= 30, "always": np.ones_like(d, bool), "adaptive": d > tau}[rule]
+        if rule == "spec30":
+            use = d > 30
+        elif rule == "freerdp30":
+            use = d >= 30
+        elif rule == "always":
+            use = np.ones_like(d, bool)
+        else:
+            use = d > tau
         p[0::2, 0::2] = np.where(use, rec, mean)
     return avc.yuv444_to_rgb(y, u, v)
 
@@ -149,30 +163,38 @@ def chroma_psnr(yuv_ref, rgb):
     return math.inf if mse < 1e-9 else 10 * math.log10(255.0**2 / mse)
 
 
+def encode_image(name):
+    """All encodes of one image (runs in a worker process)."""
+    w, h = map(int, (IMAGES / f"{name}.txt").read_text().split())
+    ref = np.frombuffer((IMAGES / f"{name}.rgba").read_bytes(), np.uint8).reshape(h, w, 4)[..., :3]
+    mag = np.max(np.stack([sobel_mag(ref[..., c]) for c in range(3)]), axis=0)
+    mask = ndimage.binary_dilation(mag > 48, iterations=1)
+    y, u, v = avc.rgb_to_yuv444(ref)
+    main_avg = avc.main_view(y, u, v)
+    encodes = []
+    for ver, aux in ((1, avc.aux_view_v1(u, v)), (2, avc.aux_view_v2(u, v))):
+        jobs = [(c, q) for c in CONFIGS for q in QPS] + [("d0", q) for q in REF_QPS if q not in QPS]
+        for cfg, qp in jobs:
+            dq, creq = CONFIGS[cfg]
+            qm = qp + dq
+            (m, a), sizes, coff = encode(main_avg, aux, w, h, qm, qp, creq, WORK / f"{name}_v{ver}_{cfg}_qp{qp}")
+            # Expected std of the reconstruction error, in quantiser-step units (see module doc).
+            tau_unit = math.sqrt(16 * qstep(qpc(qm, coff)) ** 2 + 2 * qstep(qp) ** 2 + qstep(qpc(qp, coff)) ** 2)
+            encodes.append(dict(image=name, version=ver, config=cfg, qp=qp, qp_main=qm, qp_aux=qp,
+                                chroma_qp_offset=coff, bytes_main=sizes[0], bytes_aux=sizes[1],
+                                tau_unit=round(tau_unit, 3), planes=(m, a)))
+    print(f"{name}: encoded", file=sys.stderr, flush=True)
+    return name, (ref, mask, rgb2lab(ref / 255.0), to_ycbcr709(ref)), encodes
+
+
 def main():
     names = sorted(p.stem for p in IMAGES.glob("*.rgba"))
-    encodes = []  # (name, version, config, qp, planes, sizes, tau_unit)
+    encodes = []
     refs = {}
-    for name in names:
-        w, h = map(int, (IMAGES / f"{name}.txt").read_text().split())
-        ref = np.frombuffer((IMAGES / f"{name}.rgba").read_bytes(), np.uint8).reshape(h, w, 4)[..., :3]
-        mag = np.max(np.stack([sobel_mag(ref[..., c]) for c in range(3)]), axis=0)
-        mask = ndimage.binary_dilation(mag > 48, iterations=1)
-        refs[name] = (ref, mask, rgb2lab(ref / 255.0), to_ycbcr709(ref))
-        y, u, v = avc.rgb_to_yuv444(ref)
-        main_avg = avc.main_view(y, u, v)
-        for ver, aux in ((1, avc.aux_view_v1(u, v)), (2, avc.aux_view_v2(u, v))):
-            jobs = [(c, q) for c in CONFIGS for q in QPS] + [("d0", q) for q in REF_QPS if q not in QPS]
-            for cfg, qp in jobs:
-                dq, creq = CONFIGS[cfg]
-                qm = qp + dq
-                (m, a), sizes, coff = encode(main_avg, aux, w, h, qm, qp, creq, WORK / f"{name}_v{ver}_{cfg}_qp{qp}")
-                # Expected std of the reconstruction error, in quantiser-step units (see module doc).
-                tau_unit = math.sqrt(16 * qstep(qpc(qm, coff)) ** 2 + 2 * qstep(qp) ** 2 + qstep(qpc(qp, coff)) ** 2)
-                encodes.append(dict(image=name, version=ver, config=cfg, qp=qp, qp_main=qm, qp_aux=qp,
-                                    chroma_qp_offset=coff, bytes_main=sizes[0], bytes_aux=sizes[1],
-                                    tau_unit=round(tau_unit, 3), planes=(m, a)))
-        print(f"{name}: encoded", file=sys.stderr)
+    with ProcessPoolExecutor() as pool:
+        for name, r, es in pool.map(encode_image, names):
+            refs[name] = r
+            encodes += es
 
     # Pass 1: chroma PSNR for every encode, fixed rules and the k sweep.
     rd_rows = []
