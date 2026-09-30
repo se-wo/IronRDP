@@ -35,7 +35,8 @@
 
 .PARAMETER Export
     Export the report to a new folder on the desktop (RdpDiagnostics_<computer>_<timestamp>)
-    and pack it into a .zip next to it:
+    and pack it into a .zip next to it. The desktop is the one of the user signed in to the
+    session, even when the elevated shell runs under a different admin account:
       Report.txt    - the console report as shown
       Report.json   - the full raw data
       Events.csv    - all collected events (Excel-ready, list separator of the current culture)
@@ -384,6 +385,48 @@ public static extern void WTSFreeMemory(IntPtr memory);
     }
 }
 
+function Get-SessionUserDesktop {
+    # An elevated shell may run under a different (admin) account than the user signed in to this
+    # session, so the desktop is resolved for the owner of explorer.exe in the current session
+    $sessionId = (Get-Process -Id $PID).SessionId
+    $explorer = Get-CimInstance -ClassName Win32_Process -Filter "Name = 'explorer.exe' AND SessionId = $sessionId" |
+        Select-Object -First 1
+    if ($null -ne $explorer) {
+        $sid = (Invoke-CimMethod -InputObject $explorer -MethodName GetOwnerSid).Sid
+        if ($sid) {
+            $profilePath = $null
+            $profileKey = Get-Item -LiteralPath "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$sid" -ErrorAction SilentlyContinue
+            if ($profileKey) {
+                $profilePath = $profileKey.GetValue('ProfileImagePath')
+            }
+
+            # "User Shell Folders" holds the (possibly redirected, e.g. OneDrive) desktop as REG_EXPAND_SZ.
+            # It must be expanded with the session user's profile, not with this process' environment.
+            $candidates = @()
+            $userShellFolders = Get-Item -LiteralPath "Registry::HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders" -ErrorAction SilentlyContinue
+            if ($userShellFolders) {
+                $raw = $userShellFolders.GetValue('Desktop', $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                if ($raw -and $profilePath) {
+                    $candidates += [Environment]::ExpandEnvironmentVariables(($raw -ireplace '%USERPROFILE%', $profilePath))
+                }
+            }
+            $shellFolders = Get-Item -LiteralPath "Registry::HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders" -ErrorAction SilentlyContinue
+            if ($shellFolders) {
+                $candidates += $shellFolders.GetValue('Desktop')
+            }
+            if ($profilePath) {
+                $candidates += Join-Path $profilePath 'Desktop'
+            }
+            foreach ($candidate in $candidates) {
+                if ($candidate -and (Test-Path -LiteralPath $candidate -PathType Container)) {
+                    return $candidate
+                }
+            }
+        }
+    }
+    return [Environment]::GetFolderPath('Desktop')
+}
+
 $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
     [Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $isAdmin) {
@@ -603,6 +646,7 @@ if ($runServer) {
     $knownPolicies = [ordered]@{
         'AVC444ModePreferred'              = 'Prioritize H.264/AVC 444 graphics mode'
         'AVCHardwareEncodePreferred'       = 'H.264/AVC hardware encoding'
+        'HEVCHardwareEncodePreferred'      = 'H.265/HEVC hardware encoding (Azure Virtual Desktop ADMX)'
         'bEnumerateHWBeforeSW'             = 'Use hardware graphics adapters'
         'fEnableWddmDriver'                = 'Use WDDM graphics display driver'
         'fEnableVirtualizedGraphics'       = 'Legacy RemoteFX (2008 R2 SP1) encoding'
@@ -690,6 +734,83 @@ if ($runClient) {
     $report['Client'] = $clientReport
 }
 
+# --- HEVC / H.265 ---------------------------------------------------------------------------
+Write-Section 'HEVC / H.265'
+$hevcReport = [ordered]@{}
+
+# Registry: the known policy plus any HEVC/H.265-named value in the RDP related keys, so renamed or
+# undocumented switches show up as well
+$hevcKeys = @(
+    $policyPath,
+    $clientPolicyPath,
+    $terminalServerPath,
+    (Join-Path $terminalServerPath 'WinStations'),
+    $rdpTcpPath
+)
+$hevcValues = [ordered]@{}
+foreach ($key in $hevcKeys) {
+    $values = Get-RegistryValues $key
+    foreach ($name in $values.Keys) {
+        if ($name -match 'HEVC|H\.?265') {
+            $hevcValues["$key\$name"] = $values[$name]
+        }
+    }
+}
+$hevcReport['RegistryValues'] = $hevcValues
+$hevcPolicy = (Get-RegistryValues $policyPath)['HEVCHardwareEncodePreferred']
+Write-Finding 'HEVCHardwareEncodePreferred (policy)' $(
+    if ($null -eq $hevcPolicy) { 'not configured (HEVC off)' } elseif ($hevcPolicy -eq 1) { '1 = enabled' } else { "$hevcPolicy = disabled" }
+) $(if ($hevcPolicy -eq 1) { 'Green' } else { 'White' })
+if ($hevcValues.Count -gt 0) {
+    foreach ($name in $hevcValues.Keys) {
+        Write-Finding ($name -replace '^HKLM:\\', '') $hevcValues[$name]
+    }
+}
+else {
+    Write-Finding 'HEVC/H.265 registry values' 'none found'
+}
+
+# Codec components: the Store HEVC decoder (needed on the client) and Media Foundation HEVC
+# transforms (a hardware HEVC encoder MFT on the host is what RDP HEVC encoding needs)
+$hevcPackages = $null
+try {
+    $hevcPackages = @(Get-AppxPackage -Name 'Microsoft.HEVCVideoExtension*' -AllUsers:$isAdmin -ErrorAction Stop |
+            Select-Object -Property Name, Version -Unique)
+}
+catch {
+    Write-Host "  Could not query Appx packages: $($_.Exception.Message)" -ForegroundColor DarkGray
+}
+$hevcReport['Packages'] = $hevcPackages
+Write-Finding 'HEVC Video Extension (decoder)' $(
+    if ($null -eq $hevcPackages) { 'unknown (package query failed)' }
+    elseif ($hevcPackages.Count -gt 0) { ($hevcPackages | ForEach-Object { "$($_.Name) $($_.Version)" }) -join ', ' }
+    else { 'not installed' }
+) $(if ($null -ne $hevcPackages -and $hevcPackages.Count -gt 0) { 'Green' } else { 'Yellow' })
+
+$hevcTransforms = @()
+$transformsKey = 'HKLM:\SOFTWARE\Classes\MediaFoundation\Transforms'
+foreach ($transform in @(Get-ChildItem -LiteralPath $transformsKey -ErrorAction SilentlyContinue)) {
+    $friendlyName = $transform.GetValue('')
+    if ($friendlyName -match 'HEVC|H\.?265') {
+        $hevcTransforms += $friendlyName
+    }
+}
+$hevcReport['MediaFoundationTransforms'] = $hevcTransforms
+if ($hevcTransforms.Count -gt 0) {
+    foreach ($name in $hevcTransforms) {
+        Write-Finding 'Media Foundation HEVC transform' $name
+    }
+}
+else {
+    Write-Finding 'Media Foundation HEVC transform' 'none registered (no hardware HEVC encoder/decoder MFT)'
+}
+
+Write-Host ''
+Write-Host '  RDP uses HEVC only with: policy enabled + GPU with HEVC encoder on the host + HEVC decoder on the' -ForegroundColor DarkGray
+Write-Host '  client + Windows App / Remote Desktop app as client (mstsc.exe is not listed as supported).' -ForegroundColor DarkGray
+Write-Host '  In use when event 162 shows "HevcProfile" (see graphics codec section above).' -ForegroundColor DarkGray
+$report['Hevc'] = $hevcReport
+
 Write-Section 'Hints'
 Write-Host '  - Codec events (162/170) are written once per connection: reconnect before running if they are missing.'
 Write-Host '  - Frame rate / quality counters only move while the screen changes: play a video during sampling.'
@@ -697,7 +818,7 @@ Write-Host '  - The mstsc "Connection information" dialog shows transport, RTT a
 
 if ($OutputDirectory -or $Export) {
     if (-not $OutputDirectory) {
-        $OutputDirectory = Join-Path ([Environment]::GetFolderPath('Desktop')) (
+        $OutputDirectory = Join-Path (Get-SessionUserDesktop) (
             'RdpDiagnostics_{0}_{1:yyyyMMdd_HHmmss}' -f $env:COMPUTERNAME, (Get-Date))
     }
     $null = New-Item -Path $OutputDirectory -ItemType Directory -Force

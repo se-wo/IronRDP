@@ -15,7 +15,8 @@ Set-ExecutionPolicy -Scope Process Bypass
 ```
 
 To keep or share the result, add `-Export`: the script writes `RdpDiagnostics_<computer>_<timestamp>` to the
-desktop and a `.zip` of it next to the folder. The CSV files use the list separator of the current culture,
+desktop of the user signed in to the session (also when elevated with a different admin account)
+and a `.zip` of it next to the folder. The CSV files use the list separator of the current culture,
 so they open directly in Excel (also on German Windows).
 
 On the client machine, `-Mode Client` inspects the `mstsc` event log and client-side policy.
@@ -40,6 +41,7 @@ On the client machine, `-Mode Client` inspects the `mstsc` event log and client-
 | RTT, bandwidth, loss        | `RemoteFX Network` counters (via `Win32_PerfFormattedData_Counters_RemoteFXNetwork`)   |
 | Resolution, color depth     | `WTSQuerySessionInformation` (`WTSClientDisplay`)                                      |
 | Graphics/transport policies | `HKLM\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services`                         |
+| HEVC/H.265 prerequisites    | `HEVCHardwareEncodePreferred` policy, any `*HEVC*`/`*H265*` RDP registry value, `Microsoft.HEVCVideoExtension` package, Media Foundation HEVC transforms |
 
 Counters are read through CIM classes, so the script also works on localized (e.g. German) Windows.
 Event messages are printed as logged (localized); codec detection keys on the profile names in them.
