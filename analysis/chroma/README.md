@@ -8,6 +8,7 @@ Der Bericht dazu liegt in [`../REVIEW.md`](../REVIEW.md).
 | `gen_images.py` | synthetische Testbilder (320×128) → `images/*.png` + `*.rgba` |
 | `harness/` | eigenständiges Cargo-Projekt (eigener `[workspace]`): Round-Trips durch IronRDP-Encoder und -Decoder (RFX, Progressive, NSCodec, ClearCodec, Planar, AVC420/openh264), DWT-Reversibilität, Heuristik-Kostenprobe |
 | `avc_experiment.py` | AVC420 / AVC444 v1 / AVC444v2 nach MS-RDPEGFX 3.3.8.3, libx264 mit konstantem QP, drei Client-Kombinationsvarianten |
+| `avc_main_qp_filter.py` | T9: niedrigerer QP für die AVC444-Main-View (pro Frame per `--qpfile` bzw. `chroma_qp_index_offset`) × fünf Client-Rückfilter (keiner, Spec > 30, FreeRDP ≥ 30, ohne Schwelle, adaptiv nach Bitstream-QP); braucht die `x264`-CLI |
 | `freerdp_check.c` | kleines C-Programm gegen libfreerdp3 (FreeRDP 3.32.2): AVC444-Split/-Combine, NSCodec/ClearCodec/Planar-Decode |
 | `freerdp_crosscheck.py` | treibt `freerdp_check` und vergleicht mit Spec-Modell und IronRDP-Decodern |
 | `inspect_windows_fixtures.py` | liest Windows-Server-2025-Captures (Haven-Fixtures im Testsuite-Crate) aus: NSCodec-CLL, Progressive-Quant-Tabellen |
@@ -20,11 +21,12 @@ Der Bericht dazu liegt in [`../REVIEW.md`](../REVIEW.md).
 
 ```sh
 pip install numpy pillow scikit-image          # scipy kommt mit scikit-image
-apt-get install ffmpeg                          # libx264 + H.264-Decoder
+apt-get install ffmpeg x264                     # libx264 + H.264-Decoder, x264-CLI für T9
 cd analysis/chroma
 python3 gen_images.py
 (cd harness && cargo run --release -- ..)       # braucht einen C-Compiler (openh264-bundled)
 python3 avc_experiment.py
+python3 avc_main_qp_filter.py                   # T9, ~10 min
 # FreeRDP 3.x mit -DWITH_UNICODE_BUILTIN=ON bauen, dann:
 gcc -O2 -o freerdp_check freerdp_check.c -I<freerdp>/include -I<build>/include \
     -I<freerdp>/winpr/include -I<build>/winpr/include -L<build>/libfreerdp -L<build>/winpr/libwinpr \

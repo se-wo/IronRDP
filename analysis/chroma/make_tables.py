@@ -4,6 +4,7 @@ analysis/REVIEW.md quotes.  Run after harness, avc_experiment.py,
 freerdp_crosscheck.py and metrics.py."""
 
 import csv
+import math
 from collections import defaultdict
 from pathlib import Path
 
@@ -139,6 +140,97 @@ for r in dw:
     agg[r["path"]].append(float(r["max_err_8bit_units"]))
 out.append("### T8 DWT hin und zurück ohne Quantisierung (max. Fehler in 8-Bit-Stufen, über alle Bilder)\n")
 table(["Pfad", "max", "Median der Bild-Maxima"], [[k, max(v), float(np.median(v))] for k, v in agg.items()])
+
+# --- T9: lower main-view QP x client reverse filter -------------------------
+t9 = list(csv.DictReader(open(RES / "avc_main_qp_filter.csv")))
+t9rd = list(csv.DictReader(open(RES / "avc_main_qp_filter_rd.csv")))
+FILTERS = ["none", "spec30", "freerdp30", "always", "adaptive"]
+FLABEL = ["kein Filter", "Spec (> 30)", "FreeRDP (≥ 30)", "ohne Schwelle", "adaptiv τ(QP)"]
+CFGS = ["d0", "d-3", "d-6", "d-12", "c-6", "c-12"]
+k_best = next(r["k"] for r in t9 if r["filter"] == "adaptive")
+T9 = {(r["image"], r["version"], r["config"], int(r["qp"]), r["filter"]): r for r in t9}
+
+
+def cp(v):
+    return min(float(v), 99.0)  # inf (bit-exact chroma) capped for averaging
+
+
+def t9_bytes(img, ver, cfg, qp):
+    r = T9[(img, ver, cfg, qp, "none")]
+    return int(r["bytes_main"]) + int(r["bytes_aux"])
+
+
+out.append("### T9 Niedrigerer QP für die Main View × Rückfilter im Client (AVC444, libx264, Spec-Modell)\n")
+out.append(
+    "Server: `d0` Main und Aux mit QP q; `d-N` Main mit q−N (Luma und Chroma), Aux mit q; `c-N` beide Views mit q und "
+    "`chroma_qp_index_offset` −N im PPS (wirkt auch auf die Chroma-Ebenen der Aux View). `d-3` entspricht dem Aufbau von T2/T3 "
+    "(libx264-Standard `ipratio` 1,4). Alle `d`-Streams tragen den libx264-Standard-Chroma-Offset −2. "
+    f"Client: adaptiv = rekonstruieren, wenn |Ũ − U| > k·√(16·s(QPc_main)² + 2·s(QP_aux)² + s(QPc_aux)²), s = H.264-Quantisierungsschritt, k = {k_best} (kalibriert, T9e).\n"
+)
+for metric, title in (("psnr_v", "T9a text_ff0000 (rot auf Schwarz), v1: PSNR V in dB"),
+                      ("edge_chroma_err", "T9b text_ff0000 (rot auf Schwarz), v1: Chroma-Fehler an der Kante")):
+    out.append(f"**{title}**\n")
+    rows = []
+    for qp in [22, 30]:
+        b0 = t9_bytes("text_ff0000", "1", "d0", qp)
+        for cfg in CFGS:
+            r0 = T9[("text_ff0000", "1", cfg, qp, "none")]
+            b = t9_bytes("text_ff0000", "1", cfg, qp)
+            rows.append([qp, cfg, f"{r0['qp_main']}/{r0['qp_aux']}", r0["chroma_qp_offset"], f"{b} ({(b / b0 - 1) * 100:+.0f} %)"]
+                        + [T9[("text_ff0000", "1", cfg, qp, fl)][metric] for fl in FILTERS])
+    table(["QP", "Server", "QP Main/Aux", "Chroma-Offset", "Bytes (zu d0)"] + FLABEL, rows)
+
+out.append("**T9c Alle 11 Bilder, v1 und v2, QP 18 bis 34: Chroma-PSNR (U und V) gegenüber `d0` beim selben Client-Filter**\n")
+out.append("Je Zelle: Mittelwert / schlechtester Einzelfall der Differenz in dB. Negativ im schlechtesten Fall = für diesen Client-Typ in mindestens einem Fall schlechter.\n")
+images = sorted({r["image"] for r in t9})
+rows = []
+for cfg in CFGS[1:]:
+    db = [t9_bytes(i, v, cfg, q) / t9_bytes(i, v, "d0", q) - 1 for i in images for v in "12" for q in [18, 22, 26, 30, 34]]
+    cells = []
+    for fl in FILTERS:
+        d = [cp(T9[(i, v, cfg, q, fl)]["chroma_psnr"]) - cp(T9[(i, v, "d0", q, fl)]["chroma_psnr"])
+             for i in images for v in "12" for q in [18, 22, 26, 30, 34]]
+        cells.append(f"{np.mean(d):+.2f} / {min(d):+.2f}")
+    rows.append([cfg, f"{np.mean(db) * 100:+.0f} %"] + cells)
+table(["Server", "Bytes Ø"] + FLABEL, rows)
+
+out.append("**T9d Gleiche Bitrate: Gewinn an Chroma-PSNR gegenüber `d0` mit gleich vielen Bytes (interpoliert über `d0` bei QP 12 bis 40)**\n")
+out.append("Je Zelle: Mittelwert / schlechtester Einzelfall in dB, über alle Bilder mit endlichem Chroma-PSNR, v1 und v2, QP 18 bis 34. Positiv = die Bytes sind in der Main View besser angelegt als in einem global niedrigeren QP.\n")
+curve = defaultdict(list)
+for r in t9rd:
+    if r["config"] == "d0" and (r["filter"] != "adaptive" or r["k"] == k_best):
+        curve[(r["image"], r["version"], r["filter"])].append(
+            (math.log(int(r["bytes_main"]) + int(r["bytes_aux"])), float(r["chroma_psnr"])))
+rows = []
+for cfg in CFGS[1:]:
+    cells = []
+    for fl in FILTERS:
+        gains = []
+        for i in images:
+            for v in "12":
+                pts = sorted(curve[(i, v, fl)])
+                if any(math.isinf(p) for _, p in pts):
+                    continue
+                xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+                for q in [18, 22, 26, 30, 34]:
+                    r = T9[(i, v, cfg, q, fl)]
+                    lb = math.log(int(r["bytes_main"]) + int(r["bytes_aux"]))
+                    if xs[0] <= lb <= xs[-1] and not math.isinf(float(r["chroma_psnr"])):
+                        gains.append(float(r["chroma_psnr"]) - float(np.interp(lb, xs, ys)))
+        cells.append(f"{np.mean(gains):+.2f} / {min(gains):+.2f}")
+    rows.append([cfg] + cells)
+table(["Server"] + FLABEL, rows)
+
+out.append("**T9e Kalibrierung von k (Chroma-PSNR Ø über alle Bilder, v1 und v2, alle Server-Varianten)**\n")
+sweep = defaultdict(list)
+for r in t9rd:
+    if int(r["qp"]) in (18, 22, 26, 30, 34):
+        key = f"adaptiv k={r['k']}" if r["filter"] == "adaptive" else FLABEL[FILTERS.index(r["filter"])]
+        sweep[(key, int(r["qp"]))].append(cp(r["chroma_psnr"]))
+keys = list(dict.fromkeys(k for k, _ in sweep))
+table(["Client-Filter", "Ø gesamt", "QP 18", "QP 22", "QP 26", "QP 30", "QP 34"],
+      [[k, round(float(np.mean([x for q in (18, 22, 26, 30, 34) for x in sweep[(k, q)]])), 2)]
+       + [round(float(np.mean(sweep[(k, q)])), 2) for q in (18, 22, 26, 30, 34)] for k in keys])
 
 (RES / "tables.md").write_text("\n".join(out) + "\n")
 print("results/tables.md written")
