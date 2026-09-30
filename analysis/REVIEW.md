@@ -39,7 +39,7 @@ Analyse, Phase 1 (nur lesen und messen, kein Produktcode geändert). Stand: 28.0
 | 3 | C-03 | hoch | Der Client kann AVC444 nicht dekodieren. `H264Decoder` liefert RGBA statt YUV-Planes, eine Kombination nach Spec ist damit unmöglich. |
 | 4 | C-06 | hoch | Der Client-AVC420-Pfad ignoriert `regionRects` und schneidet immer ab (0,0) aus. Bei `destRect ≠ (0,0)` landen falsche Pixel auf der Surface; ClearCodec-Kacheln im Bounding-Rect werden überschrieben. |
 | 5 | C-07 | hoch | Progressive rechnet die DWT im 8-Bit-Ganzzahlbereich. Hin und zurück ohne Quantisierung entstehen bis zu 15 Stufen Fehler. Progressive kann nie verlustfrei konvergieren. |
-| 6 | C-04 | hoch | Designgrenze AVC444: Der Rückfilter verstärkt den Codierfehler der Main-View-Chroma um Faktor 4,1 bis 5,0 (Median, gemessen). Der Schwellwert 30 kostet schon ohne Kompression 13 dB PSNR V. |
+| 6 | C-04 | hoch | Designgrenze AVC444: Der Rückfilter verstärkt den Codierfehler der Main-View-Chroma um Faktor 4,1 bis 5,0 (Median, gemessen). Der Schwellwert 30 kostet schon ohne Kompression 13 dB PSNR V. Ein QP-abhängiger Rückfilter im Client holt ohne Mehrbytes Ø 1,8 dB zurück (T9). |
 | 7 | C-08 | mittel | Der RFX-Encoder quantisiert per Floor-Shift statt gerundet (Verstoß gegen MS-RDPRFX 3.1.8.1.5). Mit Rundung: +5,6 dB PSNR V und −7 % bis −27 % Bytes. |
 | 8 | C-09 | mittel | NSCodec verwendet die maximale CLL des Clients (typisch 3) statt CLL 1. Vermeidbarer Chroma-Verlust: max. Fehler 5 bis 6 statt 1. |
 | 9 | C-10 | mittel | Keine Klassifikation oder Routing-Schnittstelle. AVC444 fehlt in Mixed Frames (offener PR #2002). `AVC_THINCLIENT` („bevorzugt AVC444“) wird ignoriert. AVC444-Sendeversuche scheitern still. |
@@ -224,14 +224,21 @@ Jeder Befund nennt Kategorie, Schwere, Status (F/H/U), Beleg, Upstream-Status un
   - Mit Rückfilter ohne Schwelle ist die Übertragung ohne Kompression nahezu verlustfrei (54,5 dB). Bei QP 30 kippt es aber: SSIM 0,60 statt 0,80.
   - Der Spec-Schwellwert ist ein Kompromiss.
   - Die Was-wäre-wenn-Variante mit **punktabgetasteter** Main-Chroma ist bei allen QPs besser (QP 22: PSNR V 47,7 statt 39,4 dB; Kanten-Chroma-Fehler 1,48 statt 2,83). Sie ist aber **nicht spec-konform** und würde bei Clients mit Rückfilter Fehler erzeugen.
-- **Einordnung:** Das erklärt plausibel, warum AVC444 in der Praxis bei moderatem QP weniger gewinnt als erhofft [H]. Gegenüber AVC420 bleibt der Gewinn für farbigen Text trotzdem groß (C-05, T2, T5).
+- **Einordnung:** Das erklärt plausibel, warum AVC444 in der Praxis bei moderatem QP weniger gewinnt als erhofft [H]. Gegenüber AVC420 bleibt der Gewinn für farbigen Text trotzdem groß (C-05, T2, T5). AVC444 ist also auch bei rotem Text auf Schwarz nicht schlechter als 4:2:0; die Verstärkung begrenzt nur den Gewinn.
+- **Aufbau von T2 bis T4:** libx264 kodiert mit dem Standard-`ipratio` 1,4 die Main View (I-Frame) mit QP q−3 und die Aux View mit q, dazu kommt ein Chroma-Offset von −2 (psy-rd). Die Main View war dort also schon feiner kodiert.
+- **Messung T9 (niedrigerer Main-QP × Client-Filter; alle 11 Bilder, v1 und v2, QP 18 bis 34):**
+  - Referenz `d0`: beide Views mit q. `d-N`: Main View mit q−N. `c-N`: `chroma_qp_index_offset` −N im PPS. Client-Filter: keiner, Spec (> 30), FreeRDP (≥ 30), ohne Schwelle, adaptiv.
+  - **Bei gleichem QP hilft ein niedrigerer Main-QP jedem Client-Typ im Mittel (T9c).** Beispiel `d-6` (+17 % Bytes): kein Filter +0,27 dB, Spec +1,03, ohne Schwelle +2,05, adaptiv +1,77 dB Chroma-PSNR. Die feste Schwelle halbiert den Gewinn. Einzelne Ausreißer bis −2,4 dB (`lines_1px`, `c-6`, QP 18).
+  - **Bei gleicher Bitrate lohnt sich ein niedrigerer Main-QP nicht (T9d).** Gegenüber einem global niedrigeren QP mit gleich vielen Bytes bringt er im Mittel höchstens +0,1 dB (Spec-Schwelle) bzw. +0,55 dB (ohne Schwelle, `c-6`). Ab `d-6` und `c-12` wird es schlechter, bis −1,25 dB. Gemessen ist nur Chroma; ein globaler QP verbessert zusätzlich Luma. Der libx264-Standard (`d-3`) liegt schon nahe am Optimum.
+  - **Ein adaptiver Rückfilter im Client wirkt ohne zusätzliche Bytes (T9e).** Er rekonstruiert, wenn |Ũ − U| > 0,4·√(16·s(QPc_main)² + 2·s(QP_aux)² + s(QPc_aux)²), s = H.264-Quantisierungsschritt. Slice-QP und PPS-Offset liest der Client aus dem Bitstream. Gegenüber der Spec-Schwelle auf denselben Streams: Ø +1,81 dB Chroma-PSNR (QP 18 +4,2; QP 22 +2,9; QP 26 +1,4; QP 30 +0,5; QP 34 +0,1), Kanten-Chroma-Fehler Ø −0,31. Schlechtester Einzelfall −0,49 dB (Verlauf, QP 18); 31 von 660 Fällen sind mehr als 0,1 dB schlechter.
+  - k ist zwischen 0,3 und 0,5 flach. Leave-one-image-out wählt für jedes der 11 Bilder k = 0,4.
+  - Rot auf Schwarz, v1, QP 22 (T9a), PSNR V: `d0` mit Spec-Schwelle 38,9 dB, adaptiv 41,9 dB; `d-3` 39,4 → 43,5 dB.
+  - FreeRDPs Grenze (≥ 30) ist minimal besser als die der Spec (> 30): Ø +0,1 dB.
 - **Upstream:** kein Bezug.
-- **Vorschlag (Forschung, nicht jetzt):**
-  - „Closed-loop“-Main-Chroma: Ũ' aus den *rekonstruierten* Aux-Samples berechnen, sodass 4·Ũ' − Σaux' ≈ U(2x,2y).
-  - QP-Offset: niedrigerer QP für Chroma in der Main View.
-  - Aux nur für statische Textregionen nachreichen (LC = 2).
-
-  Aufwand L.
+- **Vorschlag:**
+  - Client (sobald C-03 behoben ist): QP-adaptiven Rückfilter statt der festen Schwelle 30. Der Filter ist laut Spec optional, das bleibt also konform. Er funktioniert mit jedem Server und kostet keine Bytes. Voraussetzung: Slice-QP und `chroma_qp_index_offset` aus SPS, PPS und Slice-Header parsen. Aufwand S bis M. Vorbehalt: Wie der Windows-Encoder Ũ und die QPs wählt, ist unbekannt (Abschnitt 6, Frage 2). Mit AVC444-Captures prüfen.
+  - Server: Main View etwa 3 QP unter der Aux View kodieren (`d-3`), nicht mehr. Größere Offsets kosten mehr Bytes, als sie gegenüber einem globalen QP bringen.
+  - Forschung, nicht priorisiert: Aux für statische Textregionen nachreichen (LC = 2). Closed-Loop-Ũ (Ũ' aus den rekonstruierten Aux-Samples) entfernt nur den Aux-Term, rechnerisch ≤ ~10 %; nicht gemessen.
 
 #### C-05 AVC420 gegen AVC444: der Gewinn für farbigen Text ist groß
 
@@ -537,6 +544,7 @@ Methodik:
 - AVC:
   - Spec-Modell nach MS-RDPEGFX, libx264 High Profile, konstanter QP, kein B-Frame, Main- und Aux-View als ein Stream.
   - Das Spec-Modell ist bit-identisch zu FreeRDPs Server-Split (T7).
+  - libx264 kodiert die Main View mit QP q−3 (Standard-`ipratio`), die Aux View mit q. T9 setzt die QPs pro View explizit.
 - Differenzbilder (|Fehler|×4, plus 4×-Zoom Original | dekodiert | Differenz): [`chroma/results/diff/`](chroma/results/diff/).
 
 **Auszug roter Text `#FF0000` (vollständig in T1 bis T8):**
@@ -558,6 +566,7 @@ Methodik:
 - Fehlerverstärkung (T4): Median 4,1 bis 5,0.
 - AVC444 bei gleicher Bitrate klar besser (T5).
 - Schwellwert 30 ohne Kompression: 13 dB Verlust in PSNR V (T3).
+- Niedrigerer Main-QP gegen Client-Filter (T9): Bei gleicher Bitrate bringt ein niedrigerer Main-QP nichts gegenüber einem globalen QP. Ein QP-adaptiver Rückfilter im Client bringt Ø +1,8 dB Chroma-PSNR ohne Mehrbytes.
 - DWT 8 Bit: 15 Stufen (T8).
 - FreeRDP-Gegenprobe (T7):
   - Split bit-identisch.
@@ -605,7 +614,7 @@ Methodik:
 1. **AVC-Farbpfad reparieren und AVC444 ermöglichen (C-01, C-02, C-03, C-06, C-12).**
    - Zuerst #1976 übernehmen und chromatische Tests ergänzen.
    - Dann einen planaren Eingang für `H264Encoder` und `split_v1/v2`-Helfer schaffen, die bit-identisch zu FreeRDP sind. Referenz sind das Spec-Modell und die Gegenprobe in `analysis/chroma`.
-   - Im Client einen `decode_yuv420`-Pfad mit Kombination ergänzen und die Region-Rects anwenden.
+   - Im Client einen `decode_yuv420`-Pfad mit Kombination ergänzen und die Region-Rects anwenden. Für die Kombination einen QP-adaptiven Rückfilter statt der festen Schwelle 30 verwenden (C-04, T9: Ø +1,8 dB Chroma-PSNR ohne Mehrbytes).
    - **Effekt (gemessen):** Kanten-Chroma-Fehler bei rotem Text bei gleichem QP 18,5 → 2,8, bei gleicher Bitrate 18,2 → 5,8. Der heutige Pfad liegt bei 21,9 und SSIM 0,12.
    - Aufwand: M bis L.
 2. **Farbigen Text per Routing auf ClearCodec legen (C-10, C-15).**

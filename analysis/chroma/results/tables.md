@@ -281,3 +281,84 @@ RMS-Fehler des rekonstruierten U/V(2x,2y) geteilt durch den RMS-Codierfehler von
 | progressive_8bit | 15.0 | 13.0 |
 | progressive_8bit_reduce_extrapolate | 6.0 | 5.0 |
 
+### T9 Niedrigerer QP für die Main View × Rückfilter im Client (AVC444, libx264, Spec-Modell)
+
+Server: `d0` Main und Aux mit QP q; `d-N` Main mit q−N (Luma und Chroma), Aux mit q; `c-N` beide Views mit q und `chroma_qp_index_offset` −N im PPS (wirkt auch auf die Chroma-Ebenen der Aux View). `d-3` entspricht dem Aufbau von T2/T3 (libx264-Standard `ipratio` 1,4). Alle `d`-Streams tragen den libx264-Standard-Chroma-Offset −2. Client: adaptiv = rekonstruieren, wenn |Ũ − U| > k·√(16·s(QPc_main)² + 2·s(QP_aux)² + s(QPc_aux)²), s = H.264-Quantisierungsschritt, k = 0.4 (kalibriert, T9e).
+
+**T9a text_ff0000 (rot auf Schwarz), v1: PSNR V in dB**
+
+| QP | Server | QP Main/Aux | Chroma-Offset | Bytes (zu d0) | kein Filter | Spec (> 30) | FreeRDP (≥ 30) | ohne Schwelle | adaptiv τ(QP) |
+|---|---|---|---|---|---|---|---|---|---|
+| 22 | d0 | 22/22 | -2 | 18788 (+0 %) | 29.91 | 38.85 | 39.07 | 41.25 | 41.85 |
+| 22 | d-3 | 19/22 | -2 | 20105 (+7 %) | 29.93 | 39.41 | 39.71 | 42.99 | 43.48 |
+| 22 | d-6 | 16/22 | -2 | 21505 (+14 %) | 29.95 | 39.8 | 40.12 | 44.04 | 44.52 |
+| 22 | d-12 | 10/22 | -2 | 24498 (+30 %) | 29.96 | 39.85 | 40.2 | 45.51 | 45.79 |
+| 22 | c-6 | 22/22 | -6 | 20567 (+9 %) | 29.93 | 39.53 | 39.83 | 43.55 | 44.06 |
+| 22 | c-12 | 22/22 | -12 | 23330 (+24 %) | 29.93 | 39.66 | 40.1 | 45.27 | 45.62 |
+| 30 | d0 | 30/30 | -2 | 11056 (+0 %) | 29.38 | 33.54 | 33.54 | 33.12 | 33.56 |
+| 30 | d-3 | 27/30 | -2 | 12252 (+11 %) | 29.51 | 35.18 | 35.28 | 35.02 | 35.56 |
+| 30 | d-6 | 24/30 | -2 | 13636 (+23 %) | 29.59 | 35.77 | 35.89 | 36.18 | 36.95 |
+| 30 | d-12 | 18/30 | -2 | 16311 (+48 %) | 29.67 | 36.77 | 36.91 | 37.27 | 38.17 |
+| 30 | c-6 | 30/30 | -6 | 12612 (+14 %) | 29.49 | 35.23 | 35.3 | 35.47 | 36.05 |
+| 30 | c-12 | 30/30 | -12 | 15191 (+37 %) | 29.58 | 36.56 | 36.77 | 37.29 | 38.07 |
+
+**T9b text_ff0000 (rot auf Schwarz), v1: Chroma-Fehler an der Kante**
+
+| QP | Server | QP Main/Aux | Chroma-Offset | Bytes (zu d0) | kein Filter | Spec (> 30) | FreeRDP (≥ 30) | ohne Schwelle | adaptiv τ(QP) |
+|---|---|---|---|---|---|---|---|---|---|
+| 22 | d0 | 22/22 | -2 | 18788 (+0 %) | 5.979 | 3.031 | 2.993 | 2.814 | 2.601 |
+| 22 | d-3 | 19/22 | -2 | 20105 (+7 %) | 5.855 | 2.829 | 2.784 | 2.389 | 2.224 |
+| 22 | d-6 | 16/22 | -2 | 21505 (+14 %) | 5.778 | 2.683 | 2.641 | 2.131 | 1.974 |
+| 22 | d-12 | 10/22 | -2 | 24498 (+30 %) | 5.665 | 2.556 | 2.508 | 1.809 | 1.687 |
+| 22 | c-6 | 22/22 | -6 | 20567 (+9 %) | 5.801 | 2.749 | 2.698 | 2.229 | 2.062 |
+| 22 | c-12 | 22/22 | -12 | 23330 (+24 %) | 5.662 | 2.575 | 2.519 | 1.834 | 1.693 |
+| 30 | d0 | 30/30 | -2 | 11056 (+0 %) | 8.521 | 6.593 | 6.605 | 7.259 | 6.615 |
+| 30 | d-3 | 27/30 | -2 | 12252 (+11 %) | 8.266 | 5.803 | 5.785 | 6.262 | 5.812 |
+| 30 | d-6 | 24/30 | -2 | 13636 (+23 %) | 8.034 | 5.396 | 5.374 | 5.584 | 5.161 |
+| 30 | d-12 | 18/30 | -2 | 16311 (+48 %) | 7.767 | 4.902 | 4.88 | 5.001 | 4.634 |
+| 30 | c-6 | 30/30 | -6 | 12612 (+14 %) | 8.028 | 5.516 | 5.51 | 5.824 | 5.399 |
+| 30 | c-12 | 30/30 | -12 | 15191 (+37 %) | 7.544 | 4.676 | 4.624 | 4.694 | 4.365 |
+
+**T9c Alle 11 Bilder, v1 und v2, QP 18 bis 34: Chroma-PSNR (U und V) gegenüber `d0` beim selben Client-Filter**
+
+Je Zelle: Mittelwert / schlechtester Einzelfall der Differenz in dB. Negativ im schlechtesten Fall = für diesen Client-Typ in mindestens einem Fall schlechter.
+
+| Server | Bytes Ø | kein Filter | Spec (> 30) | FreeRDP (≥ 30) | ohne Schwelle | adaptiv τ(QP) |
+|---|---|---|---|---|---|---|
+| d-3 | +8 % | +0.17 / -0.63 | +0.64 / -0.63 | +0.66 / -0.63 | +1.15 / -1.63 | +1.04 / -0.63 |
+| d-6 | +17 % | +0.27 / -0.04 | +1.03 / -1.03 | +1.07 / -0.04 | +2.05 / -0.10 | +1.77 / -0.34 |
+| d-12 | +37 % | +0.43 / -0.04 | +1.43 / +0.02 | +1.49 / +0.02 | +3.00 / -0.04 | +2.56 / -0.32 |
+| c-6 | +9 % | +0.17 / -0.32 | +0.71 / -2.36 | +0.77 / -2.25 | +1.57 / -0.45 | +1.31 / -0.47 |
+| c-12 | +26 % | +0.30 / -0.04 | +1.22 / -0.02 | +1.28 / +0.00 | +2.92 / +0.00 | +2.39 / +0.00 |
+
+**T9d Gleiche Bitrate: Gewinn an Chroma-PSNR gegenüber `d0` mit gleich vielen Bytes (interpoliert über `d0` bei QP 12 bis 40)**
+
+Je Zelle: Mittelwert / schlechtester Einzelfall in dB, über alle Bilder mit endlichem Chroma-PSNR, v1 und v2, QP 18 bis 34. Positiv = die Bytes sind in der Main View besser angelegt als in einem global niedrigeren QP.
+
+| Server | kein Filter | Spec (> 30) | FreeRDP (≥ 30) | ohne Schwelle | adaptiv τ(QP) |
+|---|---|---|---|---|---|
+| d-3 | -0.03 / -0.69 | +0.12 / -2.09 | +0.11 / -1.85 | +0.39 / -2.40 | +0.26 / -1.31 |
+| d-6 | -0.20 / -1.87 | -0.10 / -1.87 | -0.13 / -1.87 | +0.21 / -3.94 | -0.06 / -1.87 |
+| d-12 | -0.44 / -2.58 | -0.84 / -3.14 | -0.88 / -3.14 | -0.89 / -2.34 | -1.25 / -3.12 |
+| c-6 | -0.05 / -0.78 | +0.07 / -3.02 | +0.10 / -1.97 | +0.55 / -1.10 | +0.35 / -1.66 |
+| c-12 | -0.25 / -2.26 | -0.59 / -4.09 | -0.61 / -4.09 | -0.20 / -3.53 | -0.56 / -4.67 |
+
+**T9e Kalibrierung von k (Chroma-PSNR Ø über alle Bilder, v1 und v2, alle Server-Varianten)**
+
+| Client-Filter | Ø gesamt | QP 18 | QP 22 | QP 26 | QP 30 | QP 34 |
+|---|---|---|---|---|---|---|
+| kein Filter | 37.45 | 38.61 | 38.36 | 37.71 | 36.82 | 35.73 |
+| Spec (> 30) | 43.17 | 46.04 | 45.13 | 43.79 | 41.69 | 39.18 |
+| FreeRDP (≥ 30) | 43.29 | 46.24 | 45.32 | 43.94 | 41.74 | 39.19 |
+| ohne Schwelle | 43.12 | 48.5 | 46.19 | 43.36 | 40.31 | 37.22 |
+| adaptiv k=0.05 | 43.43 | 48.5 | 46.2 | 43.53 | 40.85 | 38.09 |
+| adaptiv k=0.1 | 43.89 | 48.52 | 46.79 | 44.41 | 41.33 | 38.39 |
+| adaptiv k=0.15 | 44.27 | 48.96 | 47.51 | 44.61 | 41.59 | 38.68 |
+| adaptiv k=0.2 | 44.53 | 49.43 | 47.61 | 44.82 | 41.85 | 38.93 |
+| adaptiv k=0.25 | 44.77 | 49.99 | 47.78 | 44.99 | 41.98 | 39.1 |
+| adaptiv k=0.3 | 44.87 | 50.08 | 47.9 | 45.08 | 42.09 | 39.2 |
+| adaptiv k=0.4 | 44.98 | 50.24 | 48.03 | 45.2 | 42.16 | 39.25 |
+| adaptiv k=0.5 | 44.95 | 50.3 | 48.06 | 45.15 | 42.07 | 39.18 |
+| adaptiv k=0.75 | 44.41 | 50.15 | 47.73 | 44.65 | 41.45 | 38.06 |
+| adaptiv k=1.0 | 43.58 | 49.72 | 46.99 | 43.86 | 40.46 | 36.86 |
+
