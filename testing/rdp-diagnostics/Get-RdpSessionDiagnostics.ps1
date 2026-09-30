@@ -337,7 +337,7 @@ public static extern void WTSFreeMemory(IntPtr memory);
 
     [ordered]@{
         SessionId     = $sessionId
-        SessionName   = $env:SESSIONNAME
+        SessionName   = & $asString (& $query 6) # WTSWinStationName
         Protocol      = $protocol
         ClientName    = & $asString (& $query 10) # WTSClientName
         ClientAddress = $address
@@ -390,6 +390,23 @@ if ($runServer) {
     $last162 = $codecEvents | Where-Object Id -EQ 162 | Select-Object -First 1
     $last170 = $codecEvents | Where-Object Id -EQ 170 | Select-Object -First 1
 
+    # RDPGFX_CAPVERSION_* ([MS-RDPEGFX] 2.2.3), same values as ironrdp_egfx::pdu::CapabilityVersion
+    $gfxVersions = @{
+        0x80004 = '8.0'; 0x80105 = '8.1'; 0xA0002 = '10.0'; 0xA0100 = '10.1'; 0xA0200 = '10.2'
+        0xA0301 = '10.3'; 0xA0400 = '10.4'; 0xA0502 = '10.5'; 0xA0600 = '10.6'; 0xA0601 = '10.6 (errata)'
+        0xA0701 = '10.7'
+    }
+    if ($last162) {
+        if ($last162.Message -match '0x([0-9A-Fa-f]{5,8})') {
+            $version = [Convert]::ToInt32($Matches[1], 16)
+            $versionName = if ($gfxVersions.ContainsKey($version)) { "RDPGFX $($gfxVersions[$version])" } else { 'unknown version' }
+            Write-Finding 'Graphics pipeline (client caps)' ('0x{0:X5} = {1}' -f $version, $versionName)
+        }
+        if ($last162.Message -match '(?:Profile|profil)\D{0,5}(\d+)') {
+            Write-Finding 'Initial profile (raw)' $Matches[1]
+        }
+    }
+
     $codecVerdict = 'Unknown - no event 162 in the time window (reconnect, then re-run)'
     $codecColor = 'Yellow'
     if ($last162) {
@@ -411,7 +428,7 @@ if ($runServer) {
             $codecColor = 'Yellow'
         }
         elseif ($text -match 'Avc420|AVC ?420|AVC\D{0,20}:\s*1\b') {
-            $codecVerdict = 'H.264/AVC 4:2:0 (mixed mode: AVC for video regions, RemoteFX/lossless codecs for text)'
+            $codecVerdict = 'H.264/AVC 4:2:0 available (mixed mode: AVC for video-like regions, RemoteFX progressive/ClearCodec for text and UI)'
             $codecColor = 'Green'
         }
         else {
@@ -420,7 +437,7 @@ if ($runServer) {
     }
     Write-Finding 'Graphics codec (last connection)' $codecVerdict $codecColor
 
-    $hwVerdict = 'Unknown - no event 170 in the time window'
+    $hwVerdict = 'No event 170 - most likely software (CPU) encoding'
     $hwColor = 'Yellow'
     if ($last170) {
         $flag = $null
@@ -450,16 +467,40 @@ if ($runServer) {
         })
     $serverReport['TransportEvents'] = $transportEvents
 
-    $last135 = $transportEvents | Where-Object Id -EQ 135 | Select-Object -First 1
-    $lastUdpHint = $transportEvents | Where-Object { (Get-EventText $_) -match 'UDP' } | Select-Object -First 1
-    if ($last135 -and (Get-EventText $last135) -match 'UDP') {
-        Write-Finding 'Transport (last connection)' 'UDP (multitransport established, event 135)' 'Green'
+    # Event 135 is logged once per multitransport tunnel (reliable and lossy UDP each get one).
+    # Only the burst belonging to the most recent connection is summarized, and per tunnel the
+    # newest outcome wins (events are ordered newest first).
+    $tunnelEvents = @($transportEvents | Where-Object Id -EQ 135)
+    $tunnels = [ordered]@{}
+    if ($tunnelEvents.Count -gt 0) {
+        $burstStart = $tunnelEvents[0].Time.AddSeconds(-60)
+        foreach ($record in ($tunnelEvents | Where-Object { $_.Time -ge $burstStart })) {
+            $tunnel = if ($record.Message -match '[Tt]unnel\D{0,5}(\d+)') { $Matches[1] } else { '?' }
+            if ($tunnels.Contains($tunnel)) {
+                continue
+            }
+            $tunnels[$tunnel] = if ($record.Message -match 'TCP:?\s*Reason Code:\s*(\d+)\s*\(([^)]*)\)') {
+                "TCP (reason $($Matches[1]): $($Matches[2]))"
+            }
+            elseif ($record.Message -match 'UDP') {
+                'UDP'
+            }
+            else {
+                'TCP'
+            }
+        }
     }
-    elseif ($lastUdpHint) {
-        Write-Finding 'Transport (last connection)' 'UDP mentioned in recent events - check list below' 'Green'
+    $serverReport['Tunnels'] = $tunnels
+
+    if ($tunnels.Count -gt 0) {
+        $anyUdp = @($tunnels.Values | Where-Object { $_ -eq 'UDP' }).Count -gt 0
+        Write-Finding 'Transport (last connection)' $(if ($anyUdp) { 'UDP (multitransport established)' } else { 'TCP only' }) $(if ($anyUdp) { 'Green' } else { 'Yellow' })
+        foreach ($tunnel in $tunnels.Keys) {
+            Write-Finding "  Tunnel $tunnel" $tunnels[$tunnel] $(if ($tunnels[$tunnel] -eq 'UDP') { 'Green' } else { 'Gray' })
+        }
     }
     elseif ($transportEvents.Count -gt 0) {
-        Write-Finding 'Transport (last connection)' 'TCP (no UDP event found in the time window)' 'Yellow'
+        Write-Finding 'Transport (last connection)' 'TCP (no multitransport event found in the time window)' 'Yellow'
     }
     else {
         Write-Finding 'Transport (last connection)' 'Unknown - no transport events in the time window' 'Yellow'
