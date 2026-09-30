@@ -1,0 +1,20 @@
+[package]
+name = "chroma-harness"
+version = "0.0.0"
+edition = "2024"
+publish = false
+default-run = "chroma-harness"
+description = "Analysis-only codec round-trip harness (not part of the IronRDP workspace)"
+
+# Standalone workspace so the IronRDP root Cargo.toml stays untouched.
+[workspace]
+
+[dependencies]
+ironrdp-core = { path = "../../../crates/ironrdp-core" }
+ironrdp-pdu = { path = "../../../crates/ironrdp-pdu" }
+ironrdp-graphics = { path = "../../../crates/ironrdp-graphics" }
+ironrdp-nscodec = { path = "../../../crates/ironrdp-nscodec", features = ["encoder"] }
+ironrdp-dvc = { path = "../../../crates/ironrdp-dvc" }
+ironrdp-egfx = { path = "../../../crates/ironrdp-egfx", features = ["openh264-bundled"] }
+openh264 = { version = "0.9", default-features = false, features = ["source"] }
+yuv = { version = "0.8", default-features = false }
