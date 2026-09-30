@@ -14,6 +14,10 @@ Set-ExecutionPolicy -Scope Process Bypass
 .\Get-RdpSessionDiagnostics.ps1 -SampleSeconds 15
 ```
 
+To keep or share the result, add `-Export`: the script writes `RdpDiagnostics_<computer>_<timestamp>` to the
+desktop and a `.zip` of it next to the folder. The CSV files use the list separator of the current culture,
+so they open directly in Excel (also on German Windows).
+
 On the client machine, `-Mode Client` inspects the `mstsc` event log and client-side policy.
 
 | Parameter          | Default | Description                                                  |
@@ -21,7 +25,8 @@ On the client machine, `-Mode Client` inspects the `mstsc` event log and client-
 | `-Mode`            | `Auto`  | `Server`, `Client` or `Auto` (both)                          |
 | `-SampleSeconds`   | `10`    | One-second samples of the RemoteFX counters (`0` disables)   |
 | `-EventWindowHours`| `24`    | How far back to search the event logs                       |
-| `-OutputPath`      |         | Write the full raw report as JSON                            |
+| `-Export`          |         | Export `Report.txt`, `Report.json`, `Events.csv`, `Counters.csv` to a desktop folder plus `.zip` |
+| `-OutputDirectory` |         | Export into this folder instead (implies `-Export`)          |
 | `-ShowAllCounters` |         | Print every sampled RemoteFX counter                         |
 
 ## Data sources

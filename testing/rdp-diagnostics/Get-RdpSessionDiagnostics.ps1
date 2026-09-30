@@ -33,8 +33,16 @@
 .PARAMETER EventWindowHours
     How far back to look in the event logs.
 
-.PARAMETER OutputPath
-    Optional path of a JSON file that receives the full raw report.
+.PARAMETER Export
+    Export the report to a new folder on the desktop (RdpDiagnostics_<computer>_<timestamp>)
+    and pack it into a .zip next to it:
+      Report.txt    - the console report as shown
+      Report.json   - the full raw data
+      Events.csv    - all collected events (Excel-ready, list separator of the current culture)
+      Counters.csv  - sampled RemoteFX counters (avg/min/max/last per counter)
+
+.PARAMETER OutputDirectory
+    Export into this folder instead of the desktop. Implies -Export.
 
 .PARAMETER ShowAllCounters
     Also print every sampled RemoteFX counter, not only the summarized ones.
@@ -44,7 +52,10 @@
     .\Get-RdpSessionDiagnostics.ps1 -SampleSeconds 15
 
 .EXAMPLE
-    .\Get-RdpSessionDiagnostics.ps1 -Mode Client -EventWindowHours 2 -OutputPath .\rdp-client.json
+    .\Get-RdpSessionDiagnostics.ps1 -SampleSeconds 15 -Export
+
+.EXAMPLE
+    .\Get-RdpSessionDiagnostics.ps1 -Mode Client -EventWindowHours 2 -OutputDirectory C:\Temp\rdp-client
 #>
 [CmdletBinding()]
 param(
@@ -57,7 +68,9 @@ param(
     [ValidateRange(1, 720)]
     [int] $EventWindowHours = 24,
 
-    [string] $OutputPath,
+    [switch] $Export,
+
+    [string] $OutputDirectory,
 
     [switch] $ShowAllCounters
 )
@@ -77,6 +90,28 @@ $rdpTcpPath = Join-Path $terminalServerPath 'WinStations\RDP-Tcp'
 $rdpCoreLog = 'Microsoft-Windows-RemoteDesktopServices-RdpCoreTS/Operational'
 $rdpClientLog = 'Microsoft-Windows-TerminalServices-RDPClient/Operational'
 $eventStart = (Get-Date).AddHours(-$EventWindowHours)
+
+# Shadows Write-Host for the rest of the script so every line of the console report is also kept
+# for Report.txt; output still goes to the real Write-Host unchanged.
+$reportLines = New-Object System.Collections.Generic.List[string]
+$reportLine = New-Object System.Text.StringBuilder
+function Write-Host {
+    [CmdletBinding()]
+    param(
+        [Parameter(Position = 0, ValueFromPipeline)] [object] $Object = '',
+        [switch] $NoNewline,
+        [ConsoleColor] $ForegroundColor
+    )
+
+    process {
+        Microsoft.PowerShell.Utility\Write-Host @PSBoundParameters
+        $null = $reportLine.Append("$Object")
+        if (-not $NoNewline) {
+            $reportLines.Add($reportLine.ToString())
+            $null = $reportLine.Clear()
+        }
+    }
+}
 
 function Write-Section {
     param([Parameter(Mandatory)] [string] $Title)
@@ -660,8 +695,64 @@ Write-Host '  - Codec events (162/170) are written once per connection: reconnec
 Write-Host '  - Frame rate / quality counters only move while the screen changes: play a video during sampling.'
 Write-Host '  - The mstsc "Connection information" dialog shows transport, RTT and bandwidth from the client side.'
 
-if ($OutputPath) {
-    $report | ConvertTo-Json -Depth 8 | Set-Content -Path $OutputPath -Encoding UTF8
+if ($OutputDirectory -or $Export) {
+    if (-not $OutputDirectory) {
+        $OutputDirectory = Join-Path ([Environment]::GetFolderPath('Desktop')) (
+            'RdpDiagnostics_{0}_{1:yyyyMMdd_HHmmss}' -f $env:COMPUTERNAME, (Get-Date))
+    }
+    $null = New-Item -Path $OutputDirectory -ItemType Directory -Force
+    $OutputDirectory = (Resolve-Path -LiteralPath $OutputDirectory).ProviderPath
+
+    # UTF-8 with BOM so Notepad and Excel detect umlauts in localized event messages on every PowerShell version
+    $utf8Bom = New-Object System.Text.UTF8Encoding $true
+    $writeLines = {
+        param([string] $Name, [string[]] $Lines)
+        [System.IO.File]::WriteAllLines((Join-Path $OutputDirectory $Name), $Lines, $utf8Bom)
+    }
+
+    # Values are pre-formatted with the current culture: PowerShell 7 writes invariant numbers ("99.5"),
+    # which e.g. a German Excel would not parse as a number
+    $culture = [System.Globalization.CultureInfo]::CurrentCulture
+    $eventRows = @()
+    $eventSources = @(
+        @('Server', 'CodecEvents', 'Codec'),
+        @('Server', 'TransportEvents', 'Transport'),
+        @('Client', 'Events', 'Client')
+    )
+    foreach ($source in $eventSources) {
+        if ($report.Contains($source[0]) -and $report[$source[0]].Contains($source[1])) {
+            $eventRows += @($report[$source[0]][$source[1]] | ForEach-Object {
+                    [pscustomobject]@{ Category = $source[2]; Time = $_.Time.ToString('yyyy-MM-dd HH:mm:ss'); Id = $_.Id; Message = $_.Message }
+                })
+        }
+    }
+
+    $counterRows = @()
+    foreach ($className in 'RemoteFXGraphics', 'RemoteFXNetwork') {
+        if ($report.Contains('Server') -and $report['Server'].Contains($className)) {
+            $counterRows += @($report['Server'][$className] | ForEach-Object {
+                    [pscustomobject]@{
+                        Class    = $className
+                        Instance = $_.Instance
+                        Counter  = $_.Counter
+                        Avg      = ([double] $_.Avg).ToString($culture)
+                        Min      = ([double] $_.Min).ToString($culture)
+                        Max      = ([double] $_.Max).ToString($culture)
+                        Last     = ([double] $_.Last).ToString($culture)
+                    }
+                })
+        }
+    }
+
+    & $writeLines 'Report.txt' $reportLines.ToArray()
+    & $writeLines 'Report.json' @($report | ConvertTo-Json -Depth 8)
+    & $writeLines 'Events.csv' @($eventRows | ConvertTo-Csv -NoTypeInformation -UseCulture)
+    & $writeLines 'Counters.csv' @($counterRows | ConvertTo-Csv -NoTypeInformation -UseCulture)
+
+    $zipPath = "$OutputDirectory.zip"
+    Compress-Archive -Path (Join-Path $OutputDirectory '*') -DestinationPath $zipPath -Force
+
     Write-Host ''
-    Write-Host "Full report written to $OutputPath" -ForegroundColor Green
+    Write-Host "Report exported to $OutputDirectory" -ForegroundColor Green
+    Write-Host "Archive for sharing: $zipPath" -ForegroundColor Green
 }
