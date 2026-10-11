@@ -1,0 +1,10 @@
+# Regenerable, large intermediate data (see README.md for how to rebuild).
+images/*.rgba
+results/decoded/
+results/streams/
+results/avc_planes/
+results/work/
+harness/target/
+__pycache__/
+results/progressive_fixture/*.rgba
+results/progressive_fixture/*.bin

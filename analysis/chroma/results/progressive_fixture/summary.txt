@@ -1,0 +1,12 @@
+compared pixels (base tiles within region rects): 31424
+
+CONTEXT flags = 0 (REGION flags = 0x01 reduce-extrapolate in every case)
+  IronRDP  vs FreeRDP : max 253 | mean 69.291 | px >2: 100.0 % | px >8:  99.8 %
+  11.5 ref vs FreeRDP : max   1 | mean  0.045 | px >2:   0.0 % | px >8:   0.0 %
+  IronRDP  vs 11.5 ref: max 253 | mean 69.308 | px >2: 100.0 % | px >8:  99.8 %
+
+CONTEXT flags = 1 (REGION flags = 0x01 reduce-extrapolate in every case)
+  IronRDP  vs FreeRDP : max   4 | mean  0.661 | px >2:   3.3 % | px >8:   0.0 %
+  11.5 ref vs FreeRDP : max   1 | mean  0.045 | px >2:   0.0 % | px >8:   0.0 %
+  IronRDP  vs 11.5 ref: max   4 | mean  0.649 | px >2:   3.2 % | px >8:   0.0 %
+

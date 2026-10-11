@@ -1,0 +1,177 @@
+codec,image,encoded_bytes,note
+rfx_quant_default,chroma_checker,48600,
+rfx_quant_default,cleartype_text,22261,
+rfx_quant_default,gradient,9077,
+rfx_quant_default,lines_1px,27395,
+rfx_quant_default,solid_patches,266,
+rfx_quant_default,text_000080,15066,
+rfx_quant_default,text_0000ff,18403,
+rfx_quant_default,text_00ff00,24201,
+rfx_quant_default,text_800000,17225,
+rfx_quant_default,text_ff0000,21491,
+rfx_quant_default,text_ffffff,10390,
+rfx_quant_6,chroma_checker,66905,
+rfx_quant_6,cleartype_text,32436,
+rfx_quant_6,gradient,9470,
+rfx_quant_6,lines_1px,35375,
+rfx_quant_6,solid_patches,266,
+rfx_quant_6,text_000080,21174,
+rfx_quant_6,text_0000ff,26401,
+rfx_quant_6,text_00ff00,34297,
+rfx_quant_6,text_800000,25241,
+rfx_quant_6,text_ff0000,30996,
+rfx_quant_6,text_ffffff,13887,
+whatif_rfx_quant_default_rounded,chroma_checker,47086,
+whatif_rfx_quant_default_rounded,cleartype_text,20675,
+whatif_rfx_quant_default_rounded,gradient,3164,
+whatif_rfx_quant_default_rounded,lines_1px,27243,
+whatif_rfx_quant_default_rounded,solid_patches,264,
+whatif_rfx_quant_default_rounded,text_000080,11072,
+whatif_rfx_quant_default_rounded,text_0000ff,15673,
+whatif_rfx_quant_default_rounded,text_00ff00,23360,
+whatif_rfx_quant_default_rounded,text_800000,14348,
+whatif_rfx_quant_default_rounded,text_ff0000,19984,
+whatif_rfx_quant_default_rounded,text_ffffff,10338,
+whatif_rfx_quant_6_rounded,chroma_checker,65231,
+whatif_rfx_quant_6_rounded,cleartype_text,31916,
+whatif_rfx_quant_6_rounded,gradient,4093,
+whatif_rfx_quant_6_rounded,lines_1px,35242,
+whatif_rfx_quant_6_rounded,solid_patches,264,
+whatif_rfx_quant_6_rounded,text_000080,19967,
+whatif_rfx_quant_6_rounded,text_0000ff,25852,
+whatif_rfx_quant_6_rounded,text_00ff00,34120,
+whatif_rfx_quant_6_rounded,text_800000,24687,
+whatif_rfx_quant_6_rounded,text_ff0000,30714,
+whatif_rfx_quant_6_rounded,text_ffffff,13859,
+progressive_simple_q6,chroma_checker,65645,tiles=10
+progressive_simple_q6,cleartype_text,31891,tiles=10
+progressive_simple_q6,gradient,4421,tiles=10
+progressive_simple_q6,lines_1px,34483,tiles=10
+progressive_simple_q6,solid_patches,555,tiles=10
+progressive_simple_q6,text_000080,20121,tiles=10
+progressive_simple_q6,text_0000ff,25931,tiles=10
+progressive_simple_q6,text_00ff00,34299,tiles=10
+progressive_simple_q6,text_800000,24655,tiles=10
+progressive_simple_q6,text_ff0000,30818,tiles=10
+progressive_simple_q6,text_ffffff,14193,tiles=10
+progressive_simple_q6_re,chroma_checker,66346,tiles=10
+progressive_simple_q6_re,cleartype_text,31318,tiles=10
+progressive_simple_q6_re,gradient,3817,tiles=10
+progressive_simple_q6_re,lines_1px,35020,tiles=10
+progressive_simple_q6_re,solid_patches,555,tiles=10
+progressive_simple_q6_re,text_000080,18479,tiles=10
+progressive_simple_q6_re,text_0000ff,24784,tiles=10
+progressive_simple_q6_re,text_00ff00,33805,tiles=10
+progressive_simple_q6_re,text_800000,23602,tiles=10
+progressive_simple_q6_re,text_ff0000,30125,tiles=10
+progressive_simple_q6_re,text_ffffff,14213,tiles=10
+progressive_simple_default,chroma_checker,45688,tiles=10
+progressive_simple_default,cleartype_text,20551,tiles=10
+progressive_simple_default,gradient,3492,tiles=10
+progressive_simple_default,lines_1px,26366,tiles=10
+progressive_simple_default,solid_patches,555,tiles=10
+progressive_simple_default,text_000080,11360,tiles=10
+progressive_simple_default,text_0000ff,15772,tiles=10
+progressive_simple_default,text_00ff00,23291,tiles=10
+progressive_simple_default,text_800000,14411,tiles=10
+progressive_simple_default,text_ff0000,19949,tiles=10
+progressive_simple_default,text_ffffff,10557,tiles=10
+nscodec_cll1,chroma_checker,54979,cll=1
+nscodec_cll1,cleartype_text,31654,cll=1
+nscodec_cll1,gradient,92172,cll=1
+nscodec_cll1,lines_1px,35404,cll=1
+nscodec_cll1,solid_patches,4333,cll=1
+nscodec_cll1,text_000080,26840,cll=1
+nscodec_cll1,text_0000ff,26850,cll=1
+nscodec_cll1,text_00ff00,17920,cll=1
+nscodec_cll1,text_800000,26803,cll=1
+nscodec_cll1,text_ff0000,26841,cll=1
+nscodec_cll1,text_ffffff,8992,cll=1
+nscodec_cll3,chroma_checker,54979,cll=3
+nscodec_cll3,cleartype_text,32065,cll=3
+nscodec_cll3,gradient,84367,cll=3
+nscodec_cll3,lines_1px,35404,cll=3
+nscodec_cll3,solid_patches,4333,cll=3
+nscodec_cll3,text_000080,27134,cll=3
+nscodec_cll3,text_0000ff,27009,cll=3
+nscodec_cll3,text_00ff00,17895,cll=3
+nscodec_cll3,text_800000,26967,cll=3
+nscodec_cll3,text_ff0000,26915,cll=3
+nscodec_cll3,text_ffffff,8992,cll=3
+nscodec_cll7,chroma_checker,54979,cll=7
+nscodec_cll7,cleartype_text,32589,cll=7
+nscodec_cll7,gradient,41911,cll=7
+nscodec_cll7,lines_1px,35404,cll=7
+nscodec_cll7,solid_patches,4397,cll=7
+nscodec_cll7,text_000080,24918,cll=7
+nscodec_cll7,text_0000ff,26482,cll=7
+nscodec_cll7,text_00ff00,17362,cll=7
+nscodec_cll7,text_800000,19214,cll=7
+nscodec_cll7,text_ff0000,25337,cll=7
+nscodec_cll7,text_ffffff,8992,cll=7
+clearcodec,chroma_checker,75798,bit_exact=true
+clearcodec,cleartype_text,35324,bit_exact=true
+clearcodec,gradient,147218,bit_exact=true
+clearcodec,lines_1px,59928,bit_exact=true
+clearcodec,solid_patches,2574,bit_exact=true
+clearcodec,text_000080,25928,bit_exact=true
+clearcodec,text_0000ff,25972,bit_exact=true
+clearcodec,text_00ff00,25972,bit_exact=true
+clearcodec,text_800000,25928,bit_exact=true
+clearcodec,text_ff0000,25972,bit_exact=true
+clearcodec,text_ffffff,25972,bit_exact=true
+clearcodec_glyph_tiles,chroma_checker,22560,bit_exact=true glyph_hits=40 hit_mismatch=0
+clearcodec_glyph_tiles,cleartype_text,36324,bit_exact=true glyph_hits=40 hit_mismatch=0
+clearcodec_glyph_tiles,gradient,107688,bit_exact=true glyph_hits=40 hit_mismatch=0
+clearcodec_glyph_tiles,lines_1px,31922,bit_exact=true glyph_hits=40 hit_mismatch=0
+clearcodec_glyph_tiles,solid_patches,500,bit_exact=true glyph_hits=40 hit_mismatch=0
+clearcodec_glyph_tiles,text_000080,26980,bit_exact=true glyph_hits=40 hit_mismatch=0
+clearcodec_glyph_tiles,text_0000ff,27024,bit_exact=true glyph_hits=40 hit_mismatch=0
+clearcodec_glyph_tiles,text_00ff00,27024,bit_exact=true glyph_hits=40 hit_mismatch=0
+clearcodec_glyph_tiles,text_800000,26980,bit_exact=true glyph_hits=40 hit_mismatch=0
+clearcodec_glyph_tiles,text_ff0000,27024,bit_exact=true glyph_hits=40 hit_mismatch=0
+clearcodec_glyph_tiles,text_ffffff,27024,bit_exact=true glyph_hits=40 hit_mismatch=0
+planar,chroma_checker,47257,bit_exact=true
+planar,cleartype_text,30699,bit_exact=true
+planar,gradient,5460,bit_exact=true
+planar,lines_1px,5151,bit_exact=true
+planar,solid_patches,3532,bit_exact=true
+planar,text_000080,10928,bit_exact=true
+planar,text_0000ff,10952,bit_exact=true
+planar,text_00ff00,10952,bit_exact=true
+planar,text_800000,10928,bit_exact=true
+planar,text_ff0000,10952,bit_exact=true
+planar,text_ffffff,25942,bit_exact=true
+avc420_ironrdp_openh264,chroma_checker,13554,openh264 default EncoderConfig
+avc420_ironrdp_openh264,cleartype_text,9902,openh264 default EncoderConfig
+avc420_ironrdp_openh264,gradient,940,openh264 default EncoderConfig
+avc420_ironrdp_openh264,lines_1px,2881,openh264 default EncoderConfig
+avc420_ironrdp_openh264,solid_patches,360,openh264 default EncoderConfig
+avc420_ironrdp_openh264,text_000080,3348,openh264 default EncoderConfig
+avc420_ironrdp_openh264,text_0000ff,5736,openh264 default EncoderConfig
+avc420_ironrdp_openh264,text_00ff00,10603,openh264 default EncoderConfig
+avc420_ironrdp_openh264,text_800000,5801,openh264 default EncoderConfig
+avc420_ironrdp_openh264,text_ff0000,8661,openh264 default EncoderConfig
+avc420_ironrdp_openh264,text_ffffff,7952,openh264 default EncoderConfig
+avc420_colorconv_only_current,chroma_checker,0,no compression
+avc420_colorconv_only_current,cleartype_text,0,no compression
+avc420_colorconv_only_current,gradient,0,no compression
+avc420_colorconv_only_current,lines_1px,0,no compression
+avc420_colorconv_only_current,solid_patches,0,no compression
+avc420_colorconv_only_current,text_000080,0,no compression
+avc420_colorconv_only_current,text_0000ff,0,no compression
+avc420_colorconv_only_current,text_00ff00,0,no compression
+avc420_colorconv_only_current,text_800000,0,no compression
+avc420_colorconv_only_current,text_ff0000,0,no compression
+avc420_colorconv_only_current,text_ffffff,0,no compression
+avc420_colorconv_only_bt709full,chroma_checker,0,no compression
+avc420_colorconv_only_bt709full,cleartype_text,0,no compression
+avc420_colorconv_only_bt709full,gradient,0,no compression
+avc420_colorconv_only_bt709full,lines_1px,0,no compression
+avc420_colorconv_only_bt709full,solid_patches,0,no compression
+avc420_colorconv_only_bt709full,text_000080,0,no compression
+avc420_colorconv_only_bt709full,text_0000ff,0,no compression
+avc420_colorconv_only_bt709full,text_00ff00,0,no compression
+avc420_colorconv_only_bt709full,text_800000,0,no compression
+avc420_colorconv_only_bt709full,text_ff0000,0,no compression
+avc420_colorconv_only_bt709full,text_ffffff,0,no compression
