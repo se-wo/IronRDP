@@ -1,6 +1,7 @@
 //! Server-side connection sequence ([`Acceptor`]) state-machine oracle.
 
 use std::borrow::Cow;
+use std::sync::OnceLock;
 
 use ironrdp_acceptor::{Acceptor, DesktopSize, MultitransportSecurityRng};
 use ironrdp_connector::Sequence as _;
@@ -73,8 +74,12 @@ pub fn acceptor_state_machine(data: &[u8]) {
     };
     let mut stream = stream;
 
+    // Building the handshake encodes every frame of it, so it is built once
+    // per configuration rather than for every input.
+    static HANDSHAKES: [OnceLock<Vec<ClientFrame>>; 256] = [const { OnceLock::new() }; 256];
+
     let config = Config(*config);
-    let handshake = client_handshake(config);
+    let handshake = HANDSHAKES[usize::from(config.0)].get_or_init(|| client_handshake(config));
     let replay_len = usize::from(*replay_len) % (handshake.len() + 1);
     let mut replay = handshake[..replay_len].iter();
 
@@ -153,6 +158,14 @@ pub fn acceptor_state_machine(data: &[u8]) {
             continue;
         }
 
+        // A fully replayed handshake leaves nothing for the acceptor to read
+        // before it accepts the connection.
+        assert!(
+            replay_len < handshake.len(),
+            "the acceptor waits for more input in {} after the whole replayed handshake",
+            acceptor.state().name()
+        );
+
         // Frame the stream the way the server's I/O driver does: a PDU the
         // hint does not match is read and dropped, and a stream that ends
         // mid-PDU leaves the acceptor waiting for more bytes.
@@ -218,15 +231,15 @@ pub fn acceptor_state_machine(data: &[u8]) {
                     let message = decode::<X224<mcs::McsMessage<'_>>>(pdu)
                         .unwrap_or_else(|e| panic!("{state_before} wrote a PDU that is not an MCS message: {e}"))
                         .0;
-                    assert!(
+                    let expected = if state_before == "ChannelConnection" {
                         matches!(
                             message,
-                            mcs::McsMessage::AttachUserConfirm(_)
-                                | mcs::McsMessage::ChannelJoinConfirm(_)
-                                | mcs::McsMessage::SendDataIndication(_)
-                        ),
-                        "{state_before} wrote an MCS message only a client sends: {message:?}"
-                    );
+                            mcs::McsMessage::AttachUserConfirm(_) | mcs::McsMessage::ChannelJoinConfirm(_)
+                        )
+                    } else {
+                        matches!(message, mcs::McsMessage::SendDataIndication(_))
+                    };
+                    assert!(expected, "{state_before} wrote an unexpected MCS message: {message:?}");
                 }
             }
         }
@@ -355,10 +368,9 @@ fn client_handshake(config: Config) -> Vec<ClientFrame> {
 
     // The acceptor numbers every channel the client asks for after the I/O
     // channel, in request order, then allocates the message channel.
-    let static_channel_ids = (IO_CHANNEL_ID + 1..).take(static_channels.len());
-    let message_channel_id = config
-        .has(Config::MESSAGE_CHANNEL)
-        .then(|| IO_CHANNEL_ID + 1 + u16::try_from(static_channels.len()).unwrap_or(u16::MAX));
+    let mut next_channel_ids = IO_CHANNEL_ID + 1..;
+    let static_channel_ids: Vec<u16> = next_channel_ids.by_ref().take(static_channels.len()).collect();
+    let message_channel_id = config.has(Config::MESSAGE_CHANNEL).then_some(next_channel_ids.start);
 
     let mut early_capability_flags =
         ClientEarlyCapabilityFlags::SUPPORT_ERR_INFO_PDU | ClientEarlyCapabilityFlags::WANT_32_BPP_SESSION;
@@ -431,7 +443,7 @@ fn client_handshake(config: Config) -> Vec<ClientFrame> {
                 let connect_initial = ConnectInitial::with_gcc_blocks(gcc_blocks)
                     .unwrap_or_else(|e| panic!("failed to build the MCS Connect Initial: {e}"));
                 encode_frame(&X224(X224Data {
-                    data: Cow::Owned(encode_vec(&connect_initial).unwrap_or_else(|e| panic!("{e}"))),
+                    data: Cow::Owned(encode_frame(&connect_initial)),
                 }))
             },
         },
