@@ -30,9 +30,9 @@ use ironrdp_pdu::x224::{X224, X224Data};
 use ironrdp_pdu::{PduResult, find_size};
 use ironrdp_svc::{SvcMessage, SvcProcessor, SvcServerProcessor};
 
-/// Drives an [`Acceptor`] (the server side of the RDP connection sequence)
-/// with a client byte stream that starts out valid and turns into fuzzer
-/// input partway through.
+/// Drives an [`Acceptor`] (the server side of the [1.3.1.1] Connection
+/// Sequence) with a client byte stream that starts out valid and turns into
+/// fuzzer input partway through.
 ///
 /// RDP's connection sequence only reaches a deep state after a valid prefix,
 /// so feeding raw bytes to a fresh acceptor almost never gets past the first
@@ -44,7 +44,7 @@ use ironrdp_svc::{SvcMessage, SvcProcessor, SvcServerProcessor};
 /// - byte 0: how many frames of the valid handshake to replay, modulo the
 ///   handshake length plus one, so that the whole handshake can be replayed.
 ///   The handshake depends on the configuration byte.
-/// - byte 1: configuration bits, see [`Config`].
+/// - byte 1: configuration bits that vary the handshake, see `Config`.
 /// - remaining bytes: the client byte stream from that point on, framed with
 ///   [`Sequence::next_pdu_hint`] the way the server's I/O driver frames it.
 ///
@@ -67,6 +67,7 @@ use ironrdp_svc::{SvcMessage, SvcProcessor, SvcServerProcessor};
 /// stepping a consumed or accepted acceptor is a usage error, not a protocol
 /// one.
 ///
+/// [1.3.1.1]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr/023f1e69-cfe8-4ee6-9ee0-7e759fb4e4ee
 /// [`Sequence::next_pdu_hint`]: ironrdp_connector::Sequence::next_pdu_hint
 pub fn acceptor_state_machine(data: &[u8]) {
     let [replay_len, config, stream @ ..] = data else {
@@ -196,8 +197,9 @@ pub fn acceptor_state_machine(data: &[u8]) {
         };
 
         // A failing step may still write a PDU telling the client why, such as
-        // an RDP Negotiation Failure or a Set Error Info PDU, so the output
-        // must be well-formed either way.
+        // an RDP Negotiation Failure or a Set Error Info PDU. The async driver
+        // currently drops the output of a failing step, but a driver that
+        // sends it must not send a malformed PDU, so it is checked either way.
         let mut written = output.filled();
         while !written.is_empty() {
             let pdu_info = find_size(written)
