@@ -91,3 +91,8 @@ fn check_egfx_zgfx_decompress() {
 fn check_egfx_surface_state() {
     check!(egfx_surface_state);
 }
+
+#[test]
+fn check_acceptor_state_machine() {
+    check!(acceptor_state_machine);
+}
