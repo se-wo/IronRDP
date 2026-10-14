@@ -193,3 +193,10 @@ path = "fuzz_targets/egfx_surface_state.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "acceptor_state_machine"
+path = "fuzz_targets/acceptor_state_machine.rs"
+test = false
+doc = false
+bench = false
