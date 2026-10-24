@@ -2,8 +2,8 @@ use std::borrow::Cow;
 
 use ironrdp_connector::connection_activation::{ConnectionActivationSequence, ConnectionActivationState};
 use ironrdp_connector::{
-    ClientConnector, ClientConnectorState, ConnectionOutcome, Credentials, DesktopSize, MultitransportResult,
-    Sequence as _, Written,
+    ClientConnector, ClientConnectorState, ConnectionOutcome, ConnectorResult, Credentials, DesktopSize,
+    MultitransportResult, Sequence as _, Written,
 };
 use ironrdp_core::{WriteBuf, decode, encode_vec};
 use ironrdp_pdu::gcc;
@@ -20,6 +20,7 @@ use ironrdp_pdu::rdp::server_redirection::{ServerRedirectionFlags, ServerRedirec
 use ironrdp_pdu::x224::X224;
 use ironrdp_session::x224::{Processor, ProcessorOutput};
 use ironrdp_svc::StaticChannelSet;
+use rstest::rstest;
 
 use ironrdp_testsuite_core::capsets::SERVER_DEMAND_ACTIVE;
 
@@ -334,6 +335,64 @@ fn demand_active_without_input_capability_yields_empty_input_flags() {
         }
         other => panic!("expected ConnectionFinalization, got: {other:?}"),
     }
+}
+
+/// Steps a Server Demand Active whose Bitmap capability reports `server` to a client that requested `requested`,
+/// returning the desktop size the activation settles on.
+fn activate_with_server_desktop_size(requested: DesktopSize, server: DesktopSize) -> ConnectorResult<DesktopSize> {
+    let mut demand_active = SERVER_DEMAND_ACTIVE.clone();
+    let bitmap = demand_active
+        .pdu
+        .capability_sets
+        .iter_mut()
+        .find_map(|capability_set| match capability_set {
+            CapabilitySet::Bitmap(bitmap) => Some(bitmap),
+            _ => None,
+        })
+        .expect("server demand active should include a bitmap capability");
+    bitmap.desktop_width = server.width;
+    bitmap.desktop_height = server.height;
+
+    let config = ironrdp_connector::Config {
+        desktop_size: requested,
+        ..test_config()
+    };
+    let mut sequence = ConnectionActivationSequence::new(config, IO_CHANNEL_ID, USER_CHANNEL_ID);
+    let frame = encode_server_share_control(ShareControlPdu::ServerDemandActive(demand_active));
+    sequence.step(&frame, None, &mut WriteBuf::new())?;
+
+    match sequence.connection_activation_state() {
+        ConnectionActivationState::ConnectionFinalization { desktop_size, .. } => Ok(desktop_size),
+        state => panic!("expected ConnectionFinalization, got {state:?}"),
+    }
+}
+
+const fn size(width: u16, height: u16) -> DesktopSize {
+    DesktopSize { width, height }
+}
+
+#[rstest]
+// oracle: reference crates/ironrdp-egfx/src/compositor.rs (MAX_COMPOSITOR_BYTES, 256 MiB of RGBA pixels)
+#[case::largest_default_desktop(size(1024, 768), size(8192, 8192), true)]
+// oracle: reference crates/ironrdp-egfx/src/compositor.rs (MAX_COMPOSITOR_BYTES, 256 MiB of RGBA pixels)
+#[case::one_row_over_the_default_limit(size(1024, 768), size(8192, 8193), false)]
+// oracle: reference crates/ironrdp-egfx/src/compositor.rs (MAX_COMPOSITOR_BYTES, 256 MiB of RGBA pixels)
+#[case::largest_u16_desktop(size(1024, 768), size(u16::MAX, u16::MAX), false)]
+// oracle: mutant limit applied per edge instead of to the area
+#[case::wide_desktop_within_the_limit(size(1024, 768), size(32766, 2048), true)]
+// oracle: mutant requested desktop ignored when it exceeds the default limit
+#[case::client_requested_a_larger_desktop(size(16384, 4320), size(16384, 4320), true)]
+// oracle: mutant server allowed past a larger requested desktop
+#[case::server_exceeds_the_larger_requested_desktop(size(16384, 4320), size(16384, 4321), false)]
+fn demand_active_bounds_the_server_desktop_size(
+    #[case] requested: DesktopSize,
+    #[case] server: DesktopSize,
+    #[case] accepted: bool,
+) {
+    assert_eq!(
+        activate_with_server_desktop_size(requested, server).ok(),
+        accepted.then_some(server)
+    );
 }
 
 fn multitransport_request(request_id: u32, requested_protocol: RequestedProtocol) -> MultitransportRequestPdu {

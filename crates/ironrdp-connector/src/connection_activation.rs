@@ -313,6 +313,7 @@ impl Sequence for ConnectionActivationSequence {
                         width: self.config.desktop_size.width,
                         height: self.config.desktop_size.height,
                     });
+                check_server_desktop_size(desktop_size, self.config.desktop_size)?;
 
                 let share_id = share_control_ctx.share_id;
 
@@ -496,6 +497,34 @@ fn negotiated_window_support_level(window_list: Option<&WindowList>) -> Option<W
     window_list.and_then(|window_list| {
         (window_list.support_level != WindowSupportLevel::NotSupported).then_some(window_list.support_level)
     })
+}
+
+/// Desktop area, in pixels, a server may report unless the client requested a larger desktop.
+///
+/// 8192 x 8192 is the largest single-monitor desktop the Windows client accepts, and its RGBA framebuffer is 256 MiB,
+/// the budget the EGFX compositor applies to its surfaces.
+const MAX_DESKTOP_PIXELS: u32 = 8192 * 8192;
+
+/// Rejects a server desktop size larger than both [`MAX_DESKTOP_PIXELS`] and the desktop the client requested.
+///
+/// The session allocates its framebuffer at this size, so an unbounded one would let a server make the client
+/// allocate up to 65535 x 65535 x 4 bytes, about 16 GiB.
+fn check_server_desktop_size(server: DesktopSize, requested: DesktopSize) -> ConnectorResult<()> {
+    // No overflow: 65535 * 65535 < u32::MAX.
+    let area = |size: DesktopSize| u32::from(size.width) * u32::from(size.height);
+
+    if area(server) > MAX_DESKTOP_PIXELS.max(area(requested)) {
+        return Err(reason_err!(
+            "Capabilities Exchange",
+            "server desktop size {}x{} exceeds the requested {}x{} and the {MAX_DESKTOP_PIXELS}-pixel limit",
+            server.width,
+            server.height,
+            requested.width,
+            requested.height
+        ));
+    }
+
+    Ok(())
 }
 
 fn remote_app_rail_capability(
