@@ -1,0 +1,2 @@
+# Fuzz regression inputs are raw bytes, so line-ending conversion must never touch them.
+* -text
