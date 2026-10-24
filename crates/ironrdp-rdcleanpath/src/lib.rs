@@ -270,6 +270,18 @@ impl Default for RDCleanPathPdu {
     }
 }
 
+/// Largest RDCleanPath PDU [`RDCleanPathPdu::detect`] accepts, in bytes.
+///
+/// A response carries the RDP server's certificate chain.
+/// TLS stacks bound the chain they accept, such as the 100 KiB default of OpenSSL and the 64 KiB handshake message
+/// limit of rustls, and this limit leaves room for such a chain and the other fields.
+pub const MAX_PDU_LEN: usize = 256 * 1024;
+
+/// Longest DER encoding of the `[0] EXPLICIT INTEGER` version field holding a `u64`.
+///
+/// The INTEGER takes at most 9 content octets, a leading zero octet included, and each of the two headers takes 2.
+const MAX_VERSION_FIELD_LEN: usize = 2 /* [0] header */ + 2 /* INTEGER header */ + 9 /* INTEGER content */;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum DetectionResult {
     Detected { version: u64, total_length: usize },
@@ -284,12 +296,27 @@ impl RDCleanPathPdu {
     }
 
     /// Try to parse first few bytes in order to detect a RDCleanPath PDU
+    ///
+    /// Returns [`DetectionResult::NotEnoughBytes`] only while `src` ends before the version field does, which is at
+    /// most 19 bytes into the PDU: a SEQUENCE header with four length octets, then the version field.
+    /// Returns [`DetectionResult::Failed`] when the PDU declares more than [`MAX_PDU_LEN`] bytes, so that a caller
+    /// buffering the declared length cannot be made to reserve gigabytes.
     pub fn detect(src: &[u8]) -> DetectionResult {
-        use der::{Decode as _, Encode as _};
+        use der::{Decode as _, Encode as _, Reader as _};
 
         let Ok(mut slice_reader) = der::SliceReader::new(src) else {
             return DetectionResult::Failed;
         };
+
+        // The identifier octet alone rules out input that is not a SEQUENCE, before its length octets arrive.
+        match der::Tag::peek(&slice_reader) {
+            Ok(der::Tag::Sequence) => {}
+            Ok(_) => return DetectionResult::Failed,
+            Err(e) => match e.kind() {
+                der::ErrorKind::Incomplete { .. } => return DetectionResult::NotEnoughBytes,
+                _ => return DetectionResult::Failed,
+            },
+        }
 
         let header = match der::Header::decode(&mut slice_reader) {
             Ok(header) => header,
@@ -310,17 +337,34 @@ impl RDCleanPathPdu {
             return DetectionResult::Failed;
         };
 
-        match der::asn1::ContextSpecific::<u64>::decode_explicit(&mut slice_reader, der::TagNumber(0)) {
+        if MAX_PDU_LEN < total_length {
+            return DetectionResult::Failed;
+        }
+
+        // The version is the first field of the body, and no valid encoding of it is longer than
+        // MAX_VERSION_FIELD_LEN, so detection reads no further.
+        let version_field_window = body_length.min(MAX_VERSION_FIELD_LEN);
+        let Some((_, body)) = src.split_at_checked(header_encoded_len) else {
+            return DetectionResult::Failed;
+        };
+        let version_field = body.get(..version_field_window).unwrap_or(body);
+        let is_truncated = version_field.len() < version_field_window;
+
+        let Ok(mut version_reader) = der::SliceReader::new(version_field) else {
+            return DetectionResult::Failed;
+        };
+
+        match der::asn1::ContextSpecific::<u64>::decode_explicit(&mut version_reader, der::TagNumber(0)) {
             Ok(Some(version)) if version.value == VERSION_1 => DetectionResult::Detected {
                 version: VERSION_1,
                 total_length,
             },
-            Ok(Some(_)) => DetectionResult::Failed,
-            Ok(None) => DetectionResult::NotEnoughBytes,
-            Err(e) => match e.kind() {
-                der::ErrorKind::Incomplete { .. } => DetectionResult::NotEnoughBytes,
-                _ => DetectionResult::Failed,
-            },
+            // `decode_explicit` also returns `None` when the next field has another tag, which more bytes cannot fix.
+            Ok(None) if is_truncated && version_reader.is_finished() => DetectionResult::NotEnoughBytes,
+            Err(e) if is_truncated && matches!(e.kind(), der::ErrorKind::Incomplete { .. }) => {
+                DetectionResult::NotEnoughBytes
+            }
+            Ok(_) | Err(_) => DetectionResult::Failed,
         }
     }
 

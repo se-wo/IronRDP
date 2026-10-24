@@ -34,6 +34,7 @@ ironrdp-rdpadrv.path = "../ironrdp-rdpadrv"
 ironrdp-rdpeci.path = "../ironrdp-rdpeci"
 ironrdp-rdpear = { version = "0.1.0", path = "../ironrdp-rdpear" }
 ironrdp-w365.path = "../ironrdp-w365"
+ironrdp-rdcleanpath.path = "../ironrdp-rdcleanpath"
 
 [lints]
 workspace = true

@@ -3114,6 +3114,7 @@ dependencies = [
  "ironrdp-egfx",
  "ironrdp-graphics",
  "ironrdp-pdu",
+ "ironrdp-rdcleanpath",
  "ironrdp-rdpadrv",
  "ironrdp-rdpdr",
  "ironrdp-rdpear",
