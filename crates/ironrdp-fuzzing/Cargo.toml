@@ -16,7 +16,7 @@ ironrdp-bulk.path = "../ironrdp-bulk"
 ironrdp-connector.path = "../ironrdp-connector"
 ironrdp-core.path = "../ironrdp-core"
 ironrdp-graphics.path = "../ironrdp-graphics"
-ironrdp-pdu.path = "../ironrdp-pdu"
+ironrdp-pdu = { path = "../ironrdp-pdu", features = ["arbitrary"] }
 ironrdp-cliprdr.path = "../ironrdp-cliprdr"
 ironrdp-rdpdr.path = "../ironrdp-rdpdr"
 ironrdp-rdpemt = { path = "../ironrdp-rdpemt", features = ["arbitrary"] }

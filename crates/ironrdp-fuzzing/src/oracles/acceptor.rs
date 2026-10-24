@@ -4,6 +4,8 @@ use core::ops::RangeInclusive;
 use std::borrow::Cow;
 use std::sync::OnceLock;
 
+use arbitrary::Unstructured;
+
 use ironrdp_acceptor::{Acceptor, DesktopSize, MultitransportSecurityRng};
 use ironrdp_connector::Sequence as _;
 use ironrdp_core::{Encode, WriteBuf, decode, encode_vec, impl_as_any};
@@ -14,11 +16,12 @@ use ironrdp_pdu::gcc::{
     RdpVersion, SecureAccessSequence, SupportedColorDepths,
 };
 use ironrdp_pdu::mcs::{self, ConnectInitial};
-use ironrdp_pdu::nego::{self, SecurityProtocol};
+use ironrdp_pdu::nego::{self, NegoRequestData, RequestFlags, SecurityProtocol};
 use ironrdp_pdu::rdp::ClientInfoPdu;
 use ironrdp_pdu::rdp::capability_sets::{
-    self, CapabilitySet, ClientConfirmActive, DemandActive, General, GeneralExtraFlags, Input, InputFlags,
-    MajorPlatformType, MinorPlatformType, Order, OrderFlags, OrderSupportExFlags, PROTOCOL_VER,
+    self, CapabilitySet, ClientConfirmActive, CodecProperty, DemandActive, General, GeneralExtraFlags, Input,
+    InputFlags, MajorPlatformType, MinorPlatformType, Order, OrderFlags, OrderSupportExFlags, PROTOCOL_VER,
+    RemoteFxContainer,
 };
 use ironrdp_pdu::rdp::client_info::{
     AddressFamily, ClientInfo, ClientInfoFlags, CompressionType, Credentials, ExtendedClientInfo,
@@ -48,8 +51,17 @@ use ironrdp_svc::{SvcMessage, SvcProcessor, SvcServerProcessor};
 ///   handshake can be replayed.
 ///   The handshake depends on the configuration byte.
 /// - byte 1: configuration bits that vary the handshake, see `Config`.
-/// - remaining bytes: the client byte stream from that point on, framed with [`Sequence::next_pdu_hint`] the way the
-///   server's I/O driver frames it.
+/// - remaining bytes: the client frames from that point on, each starting with a mode byte:
+///   - Without `TYPED_FRAME` (bit 0), a raw frame follows, framed with [`Sequence::next_pdu_hint`] the way the server's I/O
+///     driver frames it.
+///   - With `TYPED_FRAME`, a two-byte little-endian length and that many bytes follow, from which [`arbitrary`] builds a
+///     client PDU of a type the current state reads, or of any type with `ANY_KIND_FRAME` (bit 1).
+///     Most typed frames carry the channel IDs, credentials and request ID the server expects, so that they get past
+///     those checks to the logic behind them.
+///
+/// Raw frames reach the acceptor's decoders with malformed framing.
+/// Typed frames reach the state logic with well-formed PDUs that byte mutation would rarely build, such as a Connect
+/// Initial with arbitrary GCC blocks or a Confirm Active with arbitrary capability sets.
 ///
 /// The security protocol is always TLS, so CredSSP never runs: it needs a real authentication exchange this oracle
 /// cannot replay.
@@ -257,17 +269,44 @@ pub fn acceptor_state_machine(data: &[u8]) -> AcceptorOutcome {
             state: acceptor.state().name(),
         });
 
-        // Frame the stream the way the server's I/O driver does: a PDU the hint does not match is read and dropped, and
-        // a stream that ends mid-PDU leaves the acceptor waiting for more bytes.
-        let Ok(Some((matched, length @ 1..))) = hint.find_size(stream) else {
-            break false;
-        };
-        let Some((frame, rest)) = stream.split_at_checked(length) else {
+        let [mode, rest @ ..] = stream else {
             break false;
         };
         stream = rest;
 
-        if matched && !checked_step(&mut acceptor, &mut checks, &mut output, Some(frame)) {
+        let frame = if mode & TYPED_FRAME == 0 {
+            // Frame the stream the way the server's I/O driver does: a PDU the hint does not match is read and
+            // dropped, and a stream that ends mid-PDU leaves the acceptor waiting for more bytes.
+            let Ok(Some((matched, length @ 1..))) = hint.find_size(stream) else {
+                break false;
+            };
+            let Some((frame, rest)) = stream.split_at_checked(length) else {
+                break false;
+            };
+            stream = rest;
+            if !matched {
+                continue;
+            }
+            Cow::Borrowed(frame)
+        } else {
+            let [length_low, length_high, rest @ ..] = stream else {
+                break false;
+            };
+            let (chunk, rest) =
+                rest.split_at(usize::from(u16::from_le_bytes([*length_low, *length_high])).min(rest.len()));
+            stream = rest;
+            let kinds = if mode & ANY_KIND_FRAME == 0 {
+                ClientPduKind::read_in(acceptor.state().name())
+            } else {
+                &ClientPduKind::ALL
+            };
+            let Some(frame) = typed_frame(kinds, &checks, &mut Unstructured::new(chunk)) else {
+                continue;
+            };
+            Cow::Owned(frame)
+        };
+
+        if !checked_step(&mut acceptor, &mut checks, &mut output, Some(&frame)) {
             break false;
         }
     };
@@ -462,7 +501,7 @@ pub fn acceptor_state_machine(data: &[u8]) -> AcceptorOutcome {
                                 })
                                 .expect("the Demand Active carries no Bitmap Capability Set");
 
-                            // oracle: spec crates/ironrdp-acceptor/src/connection.rs §set_honor_client_desktop_size (first round: the request clamped to the maximum, or the server size when §MIN_DESKTOP_DIM rejects it)
+                            // oracle: spec crates/ironrdp-acceptor/src/connection.rs §set_honor_client_desktop_size (first round: the request clamped per dimension to the maximum, or the server size when a clamped dimension leaves the [200, 8192] protocol bound)
                             // oracle: spec crates/ironrdp-acceptor/src/connection.rs §Acceptor::new_deactivation_reactivation (reactivation)
                             assert_eq!(
                                 size, checks.desktop_size,
@@ -589,7 +628,7 @@ pub struct AcceptorSeed {
 /// Builds the seeds for the handshake configuration `config`: one taking over in each state that reads client input,
 /// and one replaying the whole handshake.
 ///
-/// Each seed passes the rest of the valid handshake as fuzzer input, so the acceptor accepts every seed.
+/// Each seed passes the rest of the valid handshake as raw fuzzer frames, so the acceptor accepts every seed.
 pub fn acceptor_state_machine_seeds(config: u8) -> Vec<AcceptorSeed> {
     let handshake = cached_client_handshake(Config(config));
     let frames: Vec<&ClientFrame> = handshake.connection.iter().chain(&handshake.reactivation).collect();
@@ -606,7 +645,10 @@ pub fn acceptor_state_machine_seeds(config: u8) -> Vec<AcceptorSeed> {
             let reactivation = handshake.connection.len() <= index;
             let state = frames[index].state;
             let mut bytes = config_byte(index).to_vec();
-            bytes.extend(frames[index..].iter().flat_map(|frame| frame.bytes.iter().copied()));
+            for frame in &frames[index..] {
+                bytes.push(RAW_FRAME);
+                bytes.extend_from_slice(&frame.bytes);
+            }
             AcceptorSeed {
                 name: format!(
                     "seed-config{config:02x}-{}{state}",
@@ -638,6 +680,13 @@ fn cached_client_handshake(config: Config) -> &'static ClientHandshake {
     HANDSHAKES[usize::from(config.0)].get_or_init(|| client_handshake(config))
 }
 
+/// Mode byte of a raw frame of fuzzer input.
+const RAW_FRAME: u8 = 0;
+/// Mode bit of a frame built from structured fuzzer input, see [`acceptor_state_machine`].
+const TYPED_FRAME: u8 = 1 << 0;
+/// Mode bit of a typed frame that may carry any client PDU, not only one the current state reads.
+const ANY_KIND_FRAME: u8 = 1 << 1;
+
 /// Acceptor state names, in the order the connection sequence goes through them.
 ///
 /// `Connected` is the name of the accepted state.
@@ -665,8 +714,9 @@ const SERVER_DESKTOP_SIZE: DesktopSize = DesktopSize {
     height: 768,
 };
 
+/// Desktop size the client requests, wider than [`MAX_HONORED_DESKTOP_SIZE`] so that honoring it clamps the width.
 const CLIENT_DESKTOP_SIZE: DesktopSize = DesktopSize {
-    width: 1280,
+    width: 2560,
     height: 1024,
 };
 
@@ -675,7 +725,12 @@ const MAX_HONORED_DESKTOP_SIZE: DesktopSize = DesktopSize {
     height: 1080,
 };
 
-/// Desktop dimensions the acceptor honors from a client, see `MIN_DESKTOP_DIM` in `ironrdp-acceptor`.
+/// Desktop dimensions the acceptor honors from a client, the protocol bound `Acceptor::set_honor_client_desktop_size`
+/// documents.
+// UNTESTED: this range must equal the one the acceptor honors (`MIN_DESKTOP_DIM` and `MAX_DESKTOP_DIM` in
+// `ironrdp-acceptor`), or the oracle reports a correct acceptor as broken, or misses one that adopts an illegal size.
+// No replayed handshake requests a dimension outside it; only typed Connect Initials under fuzzing do.
+// When changing either range, change the other.
 const HONORED_DESKTOP_DIMENSIONS: RangeInclusive<u16> = 200..=8192;
 
 /// Desktop size the server switches to in a Deactivation-Reactivation Sequence.
@@ -876,7 +931,7 @@ fn client_handshake(config: Config) -> ClientHandshake {
             state: "InitiationWaitRequest",
             bytes: encode_frame(&X224(nego::ConnectionRequest {
                 nego_data: None,
-                flags: nego::RequestFlags::empty(),
+                flags: RequestFlags::empty(),
                 protocol: SecurityProtocol::SSL | SecurityProtocol::HYBRID,
                 correlation_info: None,
             })),
@@ -1087,6 +1142,204 @@ struct ChannelState {
     user_channel_id: u16,
     io_channel_id: u16,
     message_channel_id: Option<u16>,
+}
+
+/// Client PDUs a typed frame can carry.
+#[derive(Clone, Copy)]
+enum ClientPduKind {
+    ConnectionRequest,
+    ConnectInitial,
+    ErectDomain,
+    AttachUser,
+    ChannelJoin,
+    ClientInfo,
+    ConfirmActive,
+    MultitransportResponse,
+    Synchronize,
+    Control,
+    FontList,
+}
+
+impl ClientPduKind {
+    const ALL: [Self; 11] = [
+        Self::ConnectionRequest,
+        Self::ConnectInitial,
+        Self::ErectDomain,
+        Self::AttachUser,
+        Self::ChannelJoin,
+        Self::ClientInfo,
+        Self::ConfirmActive,
+        Self::MultitransportResponse,
+        Self::Synchronize,
+        Self::Control,
+        Self::FontList,
+    ];
+
+    /// Client PDUs the acceptor state named `state` reads.
+    fn read_in(state: &str) -> &'static [Self] {
+        match state {
+            "InitiationWaitRequest" => &[Self::ConnectionRequest],
+            "BasicSettingsWaitInitial" => &[Self::ConnectInitial],
+            "ChannelConnection" => &[Self::ErectDomain, Self::AttachUser, Self::ChannelJoin],
+            "SecureSettingsExchange" => &[Self::ClientInfo],
+            "CapabilitiesWaitConfirm" => &[Self::ConfirmActive, Self::MultitransportResponse],
+            "ConnectionFinalization" => &[Self::Synchronize, Self::Control, Self::FontList],
+            _ => &Self::ALL,
+        }
+    }
+}
+
+/// Builds a client PDU of one of `kinds` from `u` and encodes it as a frame.
+///
+/// Returns `None` when `u` runs out or the encoder rejects the generated values.
+/// Unless `u` says otherwise, the fields the acceptor checks against its earlier answers carry the values it expects.
+fn typed_frame(kinds: &[ClientPduKind], checks: &OutputChecks<'_>, u: &mut Unstructured<'_>) -> Option<Vec<u8>> {
+    let kind = *u.choose(kinds).ok()?;
+    // One frame in eight keeps the generated values, so that mismatches are fuzzed too.
+    let correlate = u.ratio(7u8, 8u8).ok()?;
+
+    let user_channel_id = checks.user_channel_id.unwrap_or(USER_CHANNEL_ID);
+    let io_channel_id = checks.channels.as_ref().map_or(IO_CHANNEL_ID, |channels| channels.io);
+    let message_channel_id = checks
+        .channels
+        .as_ref()
+        .and_then(|channels| channels.message)
+        .unwrap_or(io_channel_id);
+    let (initiator_id, share_id) = if correlate {
+        (user_channel_id, 0)
+    } else {
+        (u.arbitrary().ok()?, u.arbitrary().ok()?)
+    };
+    let channel_id =
+        |expected: u16, u: &mut Unstructured<'_>| if correlate { Some(expected) } else { u.arbitrary().ok() };
+
+    let frame = match kind {
+        ClientPduKind::ConnectionRequest => {
+            let mut protocol: SecurityProtocol = u.arbitrary().ok()?;
+            if correlate {
+                protocol |= SecurityProtocol::SSL;
+            }
+            let nego_data = match u.int_in_range(0..=2u8).ok()? {
+                0 => None,
+                1 => Some(NegoRequestData::cookie(u.arbitrary().ok()?)),
+                _ => Some(NegoRequestData::routing_token(u.arbitrary().ok()?)),
+            };
+            encode_capped(&X224(nego::ConnectionRequest {
+                nego_data,
+                flags: RequestFlags::from_bits_retain(u.arbitrary().ok()?),
+                protocol,
+                correlation_info: None,
+            }))
+        }
+        ClientPduKind::ConnectInitial => encode_capped(&u.arbitrary::<ConnectInitial>().ok()?)
+            .and_then(|data| encode_capped(&X224(X224Data { data: Cow::Owned(data) }))),
+        ClientPduKind::ErectDomain => encode_capped(&X224(u.arbitrary::<mcs::ErectDomainPdu>().ok()?)),
+        ClientPduKind::AttachUser => encode_capped(&X224(mcs::AttachUserRequest)),
+        ClientPduKind::ChannelJoin => {
+            let mut request: mcs::ChannelJoinRequest = u.arbitrary().ok()?;
+            if correlate {
+                let advertised: Vec<u16> = [user_channel_id, io_channel_id]
+                    .into_iter()
+                    .chain(
+                        checks
+                            .channels
+                            .iter()
+                            .flat_map(|channels| channels.statics.iter().copied().chain(channels.message)),
+                    )
+                    .collect();
+                request.initiator_id = user_channel_id;
+                request.channel_id = *u.choose(&advertised).ok()?;
+            }
+            encode_capped(&X224(request))
+        }
+        ClientPduKind::ClientInfo => {
+            let mut pdu: ClientInfoPdu = u.arbitrary().ok()?;
+            if correlate {
+                pdu.security_header.flags = BasicSecurityHeaderFlags::INFO_PKT;
+                pdu.client_info.credentials = client_credentials();
+            }
+            send_data_request(initiator_id, channel_id(io_channel_id, u)?, &pdu)
+        }
+        ClientPduKind::MultitransportResponse => {
+            let mut response: MultitransportResponsePdu = u.arbitrary().ok()?;
+            if correlate {
+                response.security_header.flags = BasicSecurityHeaderFlags::TRANSPORT_RSP;
+                response.request_id = MULTITRANSPORT_REQUEST_ID;
+            }
+            send_data_request(initiator_id, channel_id(message_channel_id, u)?, &response)
+        }
+        ClientPduKind::ConfirmActive => {
+            let mut confirm: ClientConfirmActive = u.arbitrary().ok()?;
+            if correlate {
+                confirm.originator_id = capability_sets::SERVER_CHANNEL_ID;
+            }
+            // A RemoteFX server container is a byte count behind a two-byte length field, but the generated count can
+            // be any `usize`, which no encoder can write and whose size computation overflows.
+            for set in &mut confirm.pdu.capability_sets {
+                let CapabilitySet::BitmapCodecs(codecs) = set else {
+                    continue;
+                };
+                for codec in &mut codecs.0 {
+                    if let CodecProperty::RemoteFx(RemoteFxContainer::ServerContainer(size))
+                    | CodecProperty::ImageRemoteFx(RemoteFxContainer::ServerContainer(size)) = &mut codec.property
+                    {
+                        *size %= usize::from(u16::MAX) + 1;
+                    }
+                }
+            }
+            let header = ShareControlHeader {
+                share_id,
+                pdu_source: initiator_id,
+                share_control_pdu: ShareControlPdu::ClientConfirmActive(confirm),
+            };
+            send_data_request(initiator_id, channel_id(io_channel_id, u)?, &header)
+        }
+        ClientPduKind::Synchronize | ClientPduKind::Control | ClientPduKind::FontList => {
+            let share_data_pdu = match kind {
+                ClientPduKind::Synchronize => ShareDataPdu::Synchronize(u.arbitrary().ok()?),
+                ClientPduKind::Control => ShareDataPdu::Control(u.arbitrary().ok()?),
+                _ => ShareDataPdu::FontList(u.arbitrary().ok()?),
+            };
+            let mut data_header: ShareDataHeader = u.arbitrary().ok()?;
+            data_header.share_data_pdu = share_data_pdu;
+            if correlate {
+                data_header.stream_priority = StreamPriority::Undefined;
+                data_header.compression_flags = CompressionFlags::empty();
+                data_header.compression_type = CompressionType::K8;
+            }
+            let header = ShareControlHeader {
+                share_id,
+                pdu_source: initiator_id,
+                share_control_pdu: ShareControlPdu::Data(data_header),
+            };
+            send_data_request(initiator_id, channel_id(io_channel_id, u)?, &header)
+        }
+    };
+
+    return frame;
+
+    fn send_data_request(initiator_id: u16, channel_id: u16, user_data: &dyn Encode) -> Option<Vec<u8>> {
+        encode_capped(&X224(mcs::SendDataRequest {
+            initiator_id,
+            channel_id,
+            user_data: Cow::Owned(encode_capped(user_data)?),
+        }))
+    }
+
+    /// Encodes `pdu`, or returns `None` when the encoder rejects it or it would not fit in a TPKT frame.
+    ///
+    /// Unlike `encode_vec`, a size that disagrees with what the encoder writes is not reported: this target checks the
+    /// acceptor, not the encoders, which the round-trip targets cover.
+    fn encode_capped(pdu: &dyn Encode) -> Option<Vec<u8>> {
+        let size = pdu.size();
+        if size > usize::from(u16::MAX) {
+            return None;
+        }
+        let mut frame = vec![0; size];
+        let written = ironrdp_core::encode(pdu, &mut frame).ok()?;
+        frame.truncate(written);
+        Some(frame)
+    }
 }
 
 fn client_credentials() -> Credentials {

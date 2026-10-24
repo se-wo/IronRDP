@@ -122,3 +122,30 @@ fn acceptor_state_machine_accepts_every_seed() {
         }
     }
 }
+
+// oracle: spec crates/ironrdp-fuzzing/src/oracles/acceptor.rs §acceptor_state_machine (no panic: every step satisfies the invariants listed there, whatever client PDU a typed frame carries)
+#[test]
+fn acceptor_state_machine_holds_for_typed_frames() {
+    use ironrdp_fuzzing::oracles;
+
+    // A configuration with every option off, two that cover every option between them, and every option on.
+    const CONFIGS: [u8; 4] = [0x00, 0x3b, 0x44, 0xff];
+    // Mode byte of a typed frame that may carry any client PDU, per the input layout.
+    const TYPED_ANY_KIND: u8 = 0b11;
+    // Number of client PDU types a typed frame can carry: chunks starting with each value below it cover every type.
+    const KINDS: u8 = 11;
+
+    for config in CONFIGS {
+        for seed in oracles::acceptor_state_machine_seeds(config) {
+            let (header, rest) = seed.bytes.split_at(2);
+            for kind in 0..KINDS {
+                let chunk = [kind, 0, 0, 0];
+                let mut input = header.to_vec();
+                input.extend([TYPED_ANY_KIND, 4, 0]);
+                input.extend(chunk);
+                input.extend(rest);
+                oracles::acceptor_state_machine(&input);
+            }
+        }
+    }
+}
