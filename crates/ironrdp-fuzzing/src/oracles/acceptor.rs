@@ -69,8 +69,10 @@ use ironrdp_svc::{StaticChannelId, SvcMessage, SvcProcessor, SvcServerProcessor}
 /// - Each PDU written decodes as what the state that wrote it sends.
 /// - The state never moves backwards in the connection sequence.
 /// - Reaching the accepted state yields a result, and unless the server was
-///   configured to accept any credentials, the result carries exactly the
-///   expected ones.
+///   configured to accept any credentials, the result of the first acceptance
+///   carries exactly the expected ones.
+/// - The Demand Active of a reactivation advertises the desktop size the
+///   server switched to.
 /// - The result of a reactivation is marked as one and keeps the MCS channel
 ///   IDs and the static channel binding of the connection it reactivates.
 ///
@@ -179,13 +181,17 @@ pub fn acceptor_state_machine(data: &[u8]) {
             continue;
         }
 
+        // Only a reactivation fixes the desktop size regardless of the input:
+        // the first Demand Active may carry a size the client asked for.
+        let demand_active_size = reactivated.map(|_| REACTIVATION_DESKTOP_SIZE);
+
         let Some(hint) = acceptor.next_pdu_hint() else {
             if acceptor.reached_security_upgrade().is_some() {
                 acceptor.mark_security_upgrade_as_done();
                 continue;
             }
 
-            if !checked_step(&mut acceptor, None, &mut output) {
+            if !checked_step(&mut acceptor, None, demand_active_size, &mut output) {
                 return;
             }
 
@@ -200,7 +206,7 @@ pub fn acceptor_state_machine(data: &[u8]) {
                 frame.state
             );
             assert!(
-                checked_step(&mut acceptor, Some(&frame.bytes), &mut output),
+                checked_step(&mut acceptor, Some(&frame.bytes), demand_active_size, &mut output),
                 "the acceptor rejected a valid {} frame from the replayed handshake",
                 frame.state
             );
@@ -227,15 +233,23 @@ pub fn acceptor_state_machine(data: &[u8]) {
         let (frame, rest) = stream.split_at(length);
         stream = rest;
 
-        if matched && !checked_step(&mut acceptor, Some(frame), &mut output) {
+        if matched && !checked_step(&mut acceptor, Some(frame), demand_active_size, &mut output) {
             return;
         }
     }
 
     /// Runs one acceptor step and checks the output and state transition.
     ///
+    /// With `demand_active_size`, a Demand Active written by the step must
+    /// advertise that desktop size.
+    ///
     /// Returns whether the step succeeded.
-    fn checked_step(acceptor: &mut Acceptor, input: Option<&[u8]>, output: &mut WriteBuf) -> bool {
+    fn checked_step(
+        acceptor: &mut Acceptor,
+        input: Option<&[u8]>,
+        demand_active_size: Option<DesktopSize>,
+        output: &mut WriteBuf,
+    ) -> bool {
         let state_before = acceptor.state().name();
 
         output.clear();
@@ -290,6 +304,12 @@ pub fn acceptor_state_machine(data: &[u8]) {
                         matches!(message, mcs::McsMessage::SendDataIndication(_))
                     };
                     assert!(expected, "{state_before} wrote an unexpected MCS message: {message:?}");
+
+                    if let (Some(size), "CapabilitiesSendServer", mcs::McsMessage::SendDataIndication(data)) =
+                        (demand_active_size, state_before, &message)
+                    {
+                        check_demand_active_size(&data.user_data, size);
+                    }
                 }
             }
         }
@@ -312,6 +332,39 @@ pub fn acceptor_state_machine(data: &[u8]) {
         );
 
         true
+    }
+
+    /// Checks that a Demand Active advertises `size` in its Bitmap Capability Set.
+    fn check_demand_active_size(user_data: &[u8], size: DesktopSize) {
+        let header = decode::<ShareControlHeader>(user_data)
+            .unwrap_or_else(|e| panic!("CapabilitiesSendServer wrote a PDU that is not a Share Control PDU: {e}"));
+        let ShareControlPdu::ServerDemandActive(demand_active) = header.share_control_pdu else {
+            panic!(
+                "CapabilitiesSendServer wrote a {} instead of a Demand Active",
+                header.share_control_pdu.as_short_name()
+            );
+        };
+
+        let mut bitmap_sizes = demand_active
+            .pdu
+            .capability_sets
+            .iter()
+            .filter_map(|capability_set| match capability_set {
+                CapabilitySet::Bitmap(bitmap) => Some((bitmap.desktop_width, bitmap.desktop_height)),
+                _ => None,
+            })
+            .peekable();
+        assert!(
+            bitmap_sizes.peek().is_some(),
+            "CapabilitiesSendServer wrote a Demand Active without a Bitmap Capability Set"
+        );
+        for (width, height) in bitmap_sizes {
+            assert_eq!(
+                (width, height),
+                (size.width, size.height),
+                "CapabilitiesSendServer advertised a desktop size other than the expected one"
+            );
+        }
     }
 
     /// Position of the named state in the connection sequence.
