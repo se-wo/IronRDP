@@ -195,9 +195,11 @@ pub struct AcceptorResult {
     pub message_channel_id: Option<u16>,
     /// Whether this result comes from an acceptor rebuilt with [`Acceptor::new_deactivation_reactivation`].
     ///
-    /// A Deactivation-Reactivation Sequence (MS-RDPBCGR 1.3.1.3) only re-runs the capability exchange and the
-    /// connection finalization, so such a result keeps the MCS channel IDs and the static channels of the connection it
-    /// reactivates.
+    /// A [1.3.1.3] Deactivation-Reactivation Sequence only re-runs the capability exchange and the connection
+    /// finalization, so such a result keeps the MCS channel IDs of the connection it reactivates.
+    /// Its static channels are the ones passed to [`Acceptor::new_deactivation_reactivation`].
+    ///
+    /// [1.3.1.3]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr/dfc234ce-481a-4674-9a5d-2a7bafb14432
     pub reactivation: bool,
     /// Keyboard layout identifier (KLID) announced by the client in its GCC
     /// Client Core Data (section 2.2.1.3.2, `keyboardLayout`).
@@ -286,9 +288,14 @@ pub struct AcceptorResult {
 impl Acceptor {
     /// Creates an acceptor for a new connection.
     ///
-    /// The server advertises `desktop_size` and `capabilities` in its Demand Active.
-    /// When `creds` is set and the connection does not use CredSSP, the acceptor answers a Client Info PDU carrying any
-    /// other credentials with an access-denied error, so [`AcceptorResult::credentials`] can only hold `creds`.
+    /// The Monitor Layout PDU describes `desktop_size`, while the Demand Active sends `capabilities` as given, so their
+    /// Bitmap Capability Set should advertise the same size.
+    /// When [`Acceptor::set_honor_client_desktop_size`] makes the acceptor adopt the size the client asks for, it
+    /// rewrites both.
+    ///
+    /// When `creds` is set and the connection does not use CredSSP, the acceptor rejects a Client Info PDU carrying any
+    /// other credentials, so [`AcceptorResult::credentials`] can only hold `creds`.
+    /// It tells the client with a Set Error Info PDU only when the client advertised support for that PDU.
     pub fn new(
         security: SecurityProtocol,
         desktop_size: DesktopSize,
@@ -513,12 +520,14 @@ impl Acceptor {
         true
     }
 
-    /// Rebuilds an accepted acceptor for a Deactivation-Reactivation Sequence (MS-RDPBCGR 1.3.1.3).
+    /// Rebuilds an accepted acceptor for a [1.3.1.3] Deactivation-Reactivation Sequence.
     ///
     /// The new acceptor re-runs only the capability exchange and the connection finalization.
-    /// Its Demand Active advertises `desktop_size`, it keeps the MCS channel IDs of `consumed`, and `static_channels`
-    /// are the channels taken from the accepted result.
+    /// Its Demand Active advertises `desktop_size` and it keeps the MCS channel IDs of `consumed`.
+    /// `static_channels` should be the channels taken from the accepted result, which the new result hands back.
     /// Fails when `consumed` never completed the licensing exchange.
+    ///
+    /// [1.3.1.3]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr/dfc234ce-481a-4674-9a5d-2a7bafb14432
     pub fn new_deactivation_reactivation(
         mut consumed: Acceptor,
         static_channels: StaticChannelSet,
