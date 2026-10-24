@@ -1273,11 +1273,12 @@ fn demand_active_uses_rdp_source_descriptor() {
 fn monitor_layout_pdu_source_is_zero() {
     let mut acceptor = multitransport_acceptor(None);
     let mut client_blocks = client_gcc_with_message_channel_and_multitransport(None);
-    let early_capability_flags = &mut client_blocks.core.optional_data.early_capability_flags;
-    *early_capability_flags = Some(
-        early_capability_flags.unwrap_or(ClientEarlyCapabilityFlags::empty())
-            | ClientEarlyCapabilityFlags::SUPPORT_MONITOR_LAYOUT_PDU,
-    );
+    client_blocks
+        .core
+        .optional_data
+        .early_capability_flags
+        .get_or_insert_with(ClientEarlyCapabilityFlags::empty)
+        .insert(ClientEarlyCapabilityFlags::SUPPORT_MONITOR_LAYOUT_PDU);
     drive_to_secure_settings_exchange(&mut acceptor, client_blocks);
 
     acceptor.step(&[], None, &mut WriteBuf::new()).unwrap(); // LicensingExchange
