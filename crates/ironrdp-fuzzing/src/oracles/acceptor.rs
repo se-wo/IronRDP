@@ -28,7 +28,7 @@ use ironrdp_pdu::rdp::headers::{
 use ironrdp_pdu::rdp::multitransport::MultitransportResponsePdu;
 use ironrdp_pdu::x224::{X224, X224Data};
 use ironrdp_pdu::{PduResult, find_size};
-use ironrdp_svc::{SvcMessage, SvcProcessor, SvcServerProcessor};
+use ironrdp_svc::{StaticChannelId, SvcMessage, SvcProcessor, SvcServerProcessor};
 
 /// Drives an [`Acceptor`] (the server side of the [1.3.1.1] Connection
 /// Sequence) with a client byte stream that starts out valid and turns into
@@ -51,7 +51,16 @@ use ironrdp_svc::{SvcMessage, SvcProcessor, SvcServerProcessor};
 /// The security protocol is always TLS, so CredSSP never runs: it needs a
 /// real authentication exchange this oracle cannot replay. The TLS upgrade
 /// itself is marked as done without any I/O, as a server does after its
-/// handshake completes.
+/// handshake completes. Client bytes that arrive while the upgrade is in
+/// progress are therefore out of reach: buffering them belongs to the I/O
+/// driver, which this oracle does not run.
+///
+/// With `Config::REACTIVATION`, the server runs a Deactivation-Reactivation
+/// Sequence after accepting the connection: it rebuilds the acceptor with
+/// [`Acceptor::new_deactivation_reactivation`], as `ironrdp-server` does on a
+/// resize, and the client answers the new Demand Active again. The replayed
+/// handshake then continues with that second round, and the fuzzer input
+/// takes over in whichever round the replay ends.
 ///
 /// Besides the absence of panics, every step must satisfy:
 ///
@@ -62,6 +71,8 @@ use ironrdp_svc::{SvcMessage, SvcProcessor, SvcServerProcessor};
 /// - Reaching the accepted state yields a result, and unless the server was
 ///   configured to accept any credentials, the result carries exactly the
 ///   expected ones.
+/// - The result of a reactivation is marked as one and keeps the MCS channel
+///   IDs and the static channel binding of the connection it reactivates.
 ///
 /// The oracle stops at the first error, as the server's driver does:
 /// stepping a consumed or accepted acceptor is a usage error, not a protocol
@@ -77,12 +88,17 @@ pub fn acceptor_state_machine(data: &[u8]) {
 
     // Building the handshake encodes every frame of it, so it is built once
     // per configuration rather than for every input.
-    static HANDSHAKES: [OnceLock<Vec<ClientFrame>>; 256] = [const { OnceLock::new() }; 256];
+    static HANDSHAKES: [OnceLock<ClientHandshake>; 256] = [const { OnceLock::new() }; 256];
 
     let config = Config(*config);
     let handshake = HANDSHAKES[usize::from(config.0)].get_or_init(|| client_handshake(config));
     let replay_len = usize::from(*replay_len) % (handshake.len() + 1);
-    let mut replay = handshake[..replay_len].iter();
+    let connection_replay_len = replay_len.min(handshake.connection.len());
+    let mut replay = handshake.connection[..connection_replay_len].iter();
+    let reactivation_replay = handshake.reactivation[..replay_len - connection_replay_len].iter();
+
+    // Channel state of the accepted connection, once a reactivation started.
+    let mut reactivated: Option<ChannelState> = None;
 
     let mut acceptor = Acceptor::new(
         SecurityProtocol::SSL,
@@ -119,6 +135,29 @@ pub fn acceptor_state_machine(data: &[u8]) {
             let result = acceptor
                 .get_result()
                 .unwrap_or_else(|| panic!("an accepted acceptor returned no result"));
+            let channel_state = ChannelState {
+                user_channel_id: result.user_channel_id,
+                io_channel_id: result.io_channel_id,
+                message_channel_id: result.message_channel_id,
+                fuzz_channel_id: result.static_channels.get_channel_id_by_type::<FuzzChannel>(),
+            };
+
+            if let Some(accepted) = reactivated {
+                assert!(
+                    result.reactivation,
+                    "the reactivated acceptor returned a result not marked as one"
+                );
+                assert_eq!(
+                    channel_state, accepted,
+                    "the reactivation changed the channel state of the connection"
+                );
+                return;
+            }
+
+            assert!(
+                !result.reactivation,
+                "the first acceptance returned a result marked as a reactivation"
+            );
 
             if !config.has(Config::ANY_CREDENTIALS) {
                 assert_eq!(
@@ -128,7 +167,16 @@ pub fn acceptor_state_machine(data: &[u8]) {
                 );
             }
 
-            return;
+            if !config.has(Config::REACTIVATION) {
+                return;
+            }
+
+            acceptor =
+                Acceptor::new_deactivation_reactivation(acceptor, result.static_channels, REACTIVATION_DESKTOP_SIZE)
+                    .unwrap_or_else(|e| panic!("failed to rebuild the accepted acceptor for a reactivation: {e}"));
+            replay = reactivation_replay.clone();
+            reactivated = Some(channel_state);
+            continue;
         }
 
         let Some(hint) = acceptor.next_pdu_hint() else {
@@ -312,6 +360,12 @@ const MAX_HONORED_DESKTOP_SIZE: DesktopSize = DesktopSize {
     height: 1080,
 };
 
+/// Desktop size the server switches to in a Deactivation-Reactivation Sequence.
+const REACTIVATION_DESKTOP_SIZE: DesktopSize = DesktopSize {
+    width: 1600,
+    height: 900,
+};
+
 const USER_CHANNEL_ID: u16 = 1002;
 const IO_CHANNEL_ID: u16 = 1003;
 
@@ -347,13 +401,32 @@ impl Config {
     /// The server accepts any credentials. Otherwise it expects the ones the
     /// valid handshake sends, so the oracle can check it never accepts others.
     const ANY_CREDENTIALS: u8 = 1 << 6;
+    /// After accepting the connection, the server runs a
+    /// Deactivation-Reactivation Sequence, and the client answers it.
+    const REACTIVATION: u8 = 1 << 7;
 
     fn has(self, flag: u8) -> bool {
         self.0 & flag != 0
     }
 }
 
+/// Valid client side of a connection sequence, see [`client_handshake`].
+struct ClientHandshake {
+    /// Frames up to the accepted connection.
+    connection: Vec<ClientFrame>,
+    /// Frames answering a Deactivation-Reactivation Sequence, empty unless
+    /// [`Config::REACTIVATION`] is set.
+    reactivation: Vec<ClientFrame>,
+}
+
+impl ClientHandshake {
+    fn len(&self) -> usize {
+        self.connection.len() + self.reactivation.len()
+    }
+}
+
 /// One client-to-server frame of the valid handshake.
+#[derive(Clone)]
 struct ClientFrame {
     /// Name of the acceptor state that reads this frame.
     state: &'static str,
@@ -361,7 +434,7 @@ struct ClientFrame {
 }
 
 /// Builds the valid client side of a TLS connection sequence for `config`.
-fn client_handshake(config: Config) -> Vec<ClientFrame> {
+fn client_handshake(config: Config) -> ClientHandshake {
     let static_channels: &[&[u8; 8]] = if config.has(Config::STATIC_CHANNELS) {
         &CLIENT_STATIC_CHANNELS
     } else {
@@ -521,7 +594,9 @@ fn client_handshake(config: Config) -> Vec<ClientFrame> {
         });
     }
 
-    frames.push(ClientFrame {
+    // The client answers every Demand Active the same way, whether it comes
+    // during the connection sequence or a Deactivation-Reactivation Sequence.
+    let mut activation = vec![ClientFrame {
         state: "CapabilitiesWaitConfirm",
         bytes: send_data_request(
             IO_CHANNEL_ID,
@@ -537,7 +612,7 @@ fn client_handshake(config: Config) -> Vec<ClientFrame> {
                 }),
             },
         ),
-    });
+    }];
 
     let finalization = [
         ShareDataPdu::Synchronize(SynchronizePdu {
@@ -555,7 +630,7 @@ fn client_handshake(config: Config) -> Vec<ClientFrame> {
         }),
         ShareDataPdu::FontList(FontPdu::default()),
     ];
-    frames.extend(finalization.into_iter().map(|share_data_pdu| ClientFrame {
+    activation.extend(finalization.into_iter().map(|share_data_pdu| ClientFrame {
         state: "ConnectionFinalization",
         bytes: send_data_request(
             IO_CHANNEL_ID,
@@ -572,7 +647,17 @@ fn client_handshake(config: Config) -> Vec<ClientFrame> {
         ),
     }));
 
-    return frames;
+    let reactivation = if config.has(Config::REACTIVATION) {
+        activation.clone()
+    } else {
+        Vec::new()
+    };
+    frames.extend(activation);
+
+    return ClientHandshake {
+        connection: frames,
+        reactivation,
+    };
 
     fn encode_frame(pdu: &dyn Encode) -> Vec<u8> {
         encode_vec(pdu).unwrap_or_else(|e| panic!("failed to encode a handshake frame: {e}"))
@@ -585,6 +670,16 @@ fn client_handshake(config: Config) -> Vec<ClientFrame> {
             user_data: Cow::Owned(encode_frame(user_data)),
         }))
     }
+}
+
+/// Channel state an accepted connection keeps across reactivations.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ChannelState {
+    user_channel_id: u16,
+    io_channel_id: u16,
+    message_channel_id: Option<u16>,
+    /// Channel ID bound to [`FuzzChannel`], if the client asked for it.
+    fuzz_channel_id: Option<StaticChannelId>,
 }
 
 fn client_credentials() -> Credentials {
