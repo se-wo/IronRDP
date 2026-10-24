@@ -9,8 +9,8 @@ use ironrdp_core::{Encode, WriteBuf, decode, encode_vec, impl_as_any};
 use ironrdp_pdu::gcc::{
     ChannelDef, ChannelName, ChannelOptions, ClientCoreData, ClientCoreOptionalData, ClientEarlyCapabilityFlags,
     ClientGccBlocks, ClientMessageChannelData, ClientNetworkData, ClientSecurityData, ColorDepth, EncryptionMethod,
-    HighColorDepth, KeyboardType, MultiTransportChannelData, MultiTransportFlags, RdpVersion, SecureAccessSequence,
-    SupportedColorDepths,
+    HighColorDepth, KeyboardType, MonitorFlags, MultiTransportChannelData, MultiTransportFlags, RdpVersion,
+    SecureAccessSequence, SupportedColorDepths,
 };
 use ironrdp_pdu::mcs::{self, ConnectInitial};
 use ironrdp_pdu::nego::{self, SecurityProtocol};
@@ -30,66 +30,68 @@ use ironrdp_pdu::x224::{X224, X224Data};
 use ironrdp_pdu::{PduResult, find_size};
 use ironrdp_svc::{StaticChannelId, SvcMessage, SvcProcessor, SvcServerProcessor};
 
-/// Drives an [`Acceptor`] (the server side of the [1.3.1.1] Connection
-/// Sequence) with a client byte stream that starts out valid and turns into
-/// fuzzer input partway through.
+/// Drives an [`Acceptor`] (the server side of the [1.3.1.1] Connection Sequence) with a client byte stream that starts
+/// out valid and turns into fuzzer input partway through.
 ///
-/// RDP's connection sequence only reaches a deep state after a valid prefix,
-/// so feeding raw bytes to a fresh acceptor almost never gets past the first
-/// decoder. Instead, the oracle replays the first frames of a valid client
-/// handshake, then hands the rest of the stream over to the fuzzer.
+/// RDP's connection sequence only reaches a deep state after a valid prefix, so feeding raw bytes to a fresh acceptor
+/// almost never gets past the first decoder.
+/// Instead, the oracle replays the first frames of a valid client handshake, then hands the rest of the stream over to
+/// the fuzzer.
 ///
 /// Input layout:
 ///
-/// - byte 0: how many frames of the valid handshake to replay, modulo the
-///   handshake length plus one, so that the whole handshake can be replayed.
+/// - byte 0: how many frames of the valid handshake to replay, modulo the handshake length plus one, so that the whole
+///   handshake can be replayed.
 ///   The handshake depends on the configuration byte.
 /// - byte 1: configuration bits that vary the handshake, see `Config`.
-/// - remaining bytes: the client byte stream from that point on, framed with
-///   [`Sequence::next_pdu_hint`] the way the server's I/O driver frames it.
+/// - remaining bytes: the client byte stream from that point on, framed with [`Sequence::next_pdu_hint`] the way the
+///   server's I/O driver frames it.
 ///
-/// The security protocol is always TLS, so CredSSP never runs: it needs a
-/// real authentication exchange this oracle cannot replay. The TLS upgrade
-/// itself is marked as done without any I/O, as a server does after its
-/// handshake completes. Client bytes that arrive while the upgrade is in
-/// progress are therefore out of reach: buffering them belongs to the I/O
-/// driver, which this oracle does not run.
+/// The security protocol is always TLS, so CredSSP never runs: it needs a real authentication exchange this oracle
+/// cannot replay.
+/// The TLS upgrade itself is marked as done without any I/O, as a server does after its handshake completes.
+/// Client bytes that arrive while the upgrade is in progress are therefore out of reach: buffering them belongs to the
+/// I/O driver, which this oracle does not run.
 ///
-/// With `Config::REACTIVATION`, the server runs a Deactivation-Reactivation
-/// Sequence after accepting the connection: it rebuilds the acceptor with
-/// [`Acceptor::new_deactivation_reactivation`], as `ironrdp-server` does on a
-/// resize, and the client answers the new Demand Active again. The replayed
-/// handshake then continues with that second round, and the fuzzer input
-/// takes over in whichever round the replay ends.
+/// With `Config::REACTIVATION`, the server runs a Deactivation-Reactivation Sequence after accepting the connection: it
+/// rebuilds the acceptor with [`Acceptor::new_deactivation_reactivation`], as `ironrdp-server` does on a resize, and
+/// the client answers the new Demand Active again.
+/// The replayed handshake then continues with that second round, and the fuzzer input takes over in whichever round the
+/// replay ends.
 ///
 /// Besides the absence of panics, every step must satisfy:
 ///
-/// - The bytes written split into complete PDUs according to their own
-///   length fields, and the PDU lengths add up to the size the step reports.
+/// - The bytes written split into complete PDUs according to their own length fields, and the PDU lengths add up to the
+///   size the step reports.
 /// - Each PDU written decodes as what the state that wrote it sends.
 /// - The state never moves backwards in the connection sequence.
-/// - Reaching the accepted state yields a result, and unless the server was
-///   configured to accept any credentials, the result of the first acceptance
-///   carries exactly the expected ones.
-/// - The Demand Active of a reactivation advertises the desktop size the
-///   server switched to.
-/// - The result of a reactivation is marked as one and keeps the MCS channel
-///   IDs and the static channel binding of the connection it reactivates.
+/// - Every channel join the server confirms names a channel it advertised, and when the Connect Initial is replayed,
+///   the server advertises exactly the channels the replayed handshake joins.
+/// - The Demand Active advertises the server's own desktop size, or with `Config::HONOR_DESKTOP_SIZE` a size within the
+///   configured maximum, which is the client's requested size when the Connect Initial is replayed.
+///   A reactivation advertises the size the server switched to.
+/// - A Monitor Layout PDU describes a desktop of the size the Demand Active advertised.
+/// - Reaching the accepted state yields a result, and unless the server was configured to accept any credentials, the
+///   result of the first acceptance carries exactly the expected ones.
+/// - The result of a reactivation is marked as one and keeps the MCS channel IDs and the static channel binding of the
+///   connection it reactivates.
 ///
-/// The oracle stops at the first error, as the server's driver does:
-/// stepping a consumed or accepted acceptor is a usage error, not a protocol
-/// one.
+/// The oracle stops at the first error, as the server's driver does: stepping a consumed or accepted acceptor is a
+/// usage error, not a protocol one.
+///
+/// Returns whether the acceptor accepted the connection, and with `Config::REACTIVATION` its reactivation too, so that
+/// a test can tell a valid handshake that still gets through from one that stops early.
 ///
 /// [1.3.1.1]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr/023f1e69-cfe8-4ee6-9ee0-7e759fb4e4ee
 /// [`Sequence::next_pdu_hint`]: ironrdp_connector::Sequence::next_pdu_hint
-pub fn acceptor_state_machine(data: &[u8]) {
+pub fn acceptor_state_machine(data: &[u8]) -> bool {
     let [replay_len, config, stream @ ..] = data else {
-        return;
+        return false;
     };
     let mut stream = stream;
 
-    // Building the handshake encodes every frame of it, so it is built once
-    // per configuration rather than for every input.
+    // Building the handshake encodes every frame of it, so it is built once per configuration rather than for every
+    // input.
     static HANDSHAKES: [OnceLock<ClientHandshake>; 256] = [const { OnceLock::new() }; 256];
 
     let config = Config(*config);
@@ -98,6 +100,21 @@ pub fn acceptor_state_machine(data: &[u8]) {
     let connection_replay_len = replay_len.min(handshake.connection.len());
     let mut replay = handshake.connection[..connection_replay_len].iter();
     let reactivation_replay = handshake.reactivation[..replay_len - connection_replay_len].iter();
+
+    let replayed_connect_initial = handshake.connection[..connection_replay_len]
+        .iter()
+        .any(|frame| frame.state == "BasicSettingsWaitInitial");
+    let mut checks = OutputChecks {
+        expected_channels: replayed_connect_initial.then_some(&handshake.channels),
+        desktop_size: match (config.has(Config::HONOR_DESKTOP_SIZE), replayed_connect_initial) {
+            (false, _) => DesktopSizeRule::Exact(SERVER_DESKTOP_SIZE),
+            (true, true) => DesktopSizeRule::Exact(CLIENT_DESKTOP_SIZE),
+            (true, false) => DesktopSizeRule::AtMost(MAX_HONORED_DESKTOP_SIZE),
+        },
+        channels: None,
+        user_channel_id: None,
+        advertised_desktop_size: None,
+    };
 
     // Channel state of the accepted connection, once a reactivation started.
     let mut reactivated: Option<ChannelState> = None;
@@ -145,23 +162,27 @@ pub fn acceptor_state_machine(data: &[u8]) {
             };
 
             if let Some(accepted) = reactivated {
+                // oracle: reference crates/ironrdp-server/src/server.rs §client_accepted (the server tells a reactivation from a new connection by this flag)
                 assert!(
                     result.reactivation,
                     "the reactivated acceptor returned a result not marked as one"
                 );
+                // oracle: spec MS-RDPBCGR §1.3.1.3 (a reactivation only re-runs the capability exchange and finalization, so the channels stay)
                 assert_eq!(
                     channel_state, accepted,
                     "the reactivation changed the channel state of the connection"
                 );
-                return;
+                return true;
             }
 
+            // oracle: reference crates/ironrdp-server/src/server.rs §client_accepted
             assert!(
                 !result.reactivation,
                 "the first acceptance returned a result marked as a reactivation"
             );
 
             if !config.has(Config::ANY_CREDENTIALS) {
+                // oracle: spec crates/ironrdp-acceptor/src/connection.rs §AcceptorResult::credentials (the server was given the credentials the handshake sends, so it accepts no others)
                 assert_eq!(
                     result.credentials,
                     Some(client_credentials()),
@@ -170,7 +191,7 @@ pub fn acceptor_state_machine(data: &[u8]) {
             }
 
             if !config.has(Config::REACTIVATION) {
-                return;
+                return true;
             }
 
             acceptor =
@@ -178,12 +199,9 @@ pub fn acceptor_state_machine(data: &[u8]) {
                     .unwrap_or_else(|e| panic!("failed to rebuild the accepted acceptor for a reactivation: {e}"));
             replay = reactivation_replay.clone();
             reactivated = Some(channel_state);
+            checks.desktop_size = DesktopSizeRule::Exact(REACTIVATION_DESKTOP_SIZE);
             continue;
         }
-
-        // Only a reactivation fixes the desktop size regardless of the input:
-        // the first Demand Active may carry a size the client asked for.
-        let demand_active_size = reactivated.map(|_| REACTIVATION_DESKTOP_SIZE);
 
         let Some(hint) = acceptor.next_pdu_hint() else {
             if acceptor.reached_security_upgrade().is_some() {
@@ -191,8 +209,8 @@ pub fn acceptor_state_machine(data: &[u8]) {
                 continue;
             }
 
-            if !checked_step(&mut acceptor, None, demand_active_size, &mut output) {
-                return;
+            if !checked_step(&mut acceptor, None, &mut checks, &mut output) {
+                return false;
             }
 
             continue;
@@ -206,48 +224,43 @@ pub fn acceptor_state_machine(data: &[u8]) {
                 frame.state
             );
             assert!(
-                checked_step(&mut acceptor, Some(&frame.bytes), demand_active_size, &mut output),
+                checked_step(&mut acceptor, Some(&frame.bytes), &mut checks, &mut output),
                 "the acceptor rejected a valid {} frame from the replayed handshake",
                 frame.state
             );
             continue;
         }
 
-        // A fully replayed handshake leaves nothing for the acceptor to read
-        // before it accepts the connection.
+        // A fully replayed handshake leaves nothing for the acceptor to read before it accepts the connection.
         assert!(
             replay_len < handshake.len(),
             "the acceptor waits for more input in {} after the whole replayed handshake",
             acceptor.state().name()
         );
 
-        // Frame the stream the way the server's I/O driver does: a PDU the
-        // hint does not match is read and dropped, and a stream that ends
-        // mid-PDU leaves the acceptor waiting for more bytes.
+        // Frame the stream the way the server's I/O driver does: a PDU the hint does not match is read and dropped, and
+        // a stream that ends mid-PDU leaves the acceptor waiting for more bytes.
         let Ok(Some((matched, length))) = hint.find_size(stream) else {
-            return;
+            return false;
         };
-        if length == 0 || stream.len() < length {
-            return;
+        if !(0 < length && length <= stream.len()) {
+            return false;
         }
         let (frame, rest) = stream.split_at(length);
         stream = rest;
 
-        if matched && !checked_step(&mut acceptor, Some(frame), demand_active_size, &mut output) {
-            return;
+        if matched && !checked_step(&mut acceptor, Some(frame), &mut checks, &mut output) {
+            return false;
         }
     }
 
     /// Runs one acceptor step and checks the output and state transition.
     ///
-    /// With `demand_active_size`, a Demand Active written by the step must
-    /// advertise that desktop size.
-    ///
     /// Returns whether the step succeeded.
     fn checked_step(
         acceptor: &mut Acceptor,
         input: Option<&[u8]>,
-        demand_active_size: Option<DesktopSize>,
+        checks: &mut OutputChecks<'_>,
         output: &mut WriteBuf,
     ) -> bool {
         let state_before = acceptor.state().name();
@@ -258,10 +271,10 @@ pub fn acceptor_state_machine(data: &[u8]) {
             None => acceptor.step_no_input(output),
         };
 
-        // A failing step may still write a PDU telling the client why, such as
-        // an RDP Negotiation Failure or a Set Error Info PDU. The async driver
-        // currently drops the output of a failing step, but a driver that
-        // sends it must not send a malformed PDU, so it is checked either way.
+        // A failing step may still write a PDU telling the client why, such as an RDP Negotiation Failure or a Set
+        // Error Info PDU.
+        // The async driver currently drops the output of a failing step, but a driver that sends it must not send a
+        // malformed PDU, so it is checked either way.
         let mut written = output.filled();
         while !written.is_empty() {
             let pdu_info = find_size(written)
@@ -277,6 +290,7 @@ pub fn acceptor_state_machine(data: &[u8]) {
             let (pdu, rest) = written.split_at(pdu_info.length);
             written = rest;
 
+            // oracle: spec MS-RDPBCGR §1.3.1.1 (the PDU each phase of the connection sequence sends)
             match state_before {
                 "InitiationSendConfirm" => {
                     if let Err(e) = decode::<X224<nego::ConnectionConfirm>>(pdu) {
@@ -287,28 +301,143 @@ pub fn acceptor_state_machine(data: &[u8]) {
                     let payload = decode::<X224<X224Data<'_>>>(pdu)
                         .unwrap_or_else(|e| panic!("{state_before} wrote a PDU that is not X.224 data: {e}"))
                         .0;
-                    if let Err(e) = decode::<mcs::ConnectResponse>(payload.data.as_ref()) {
-                        panic!("{state_before} wrote a PDU that is not an MCS Connect Response: {e}");
+                    let response = decode::<mcs::ConnectResponse>(payload.data.as_ref()).unwrap_or_else(|e| {
+                        panic!("{state_before} wrote a PDU that is not an MCS Connect Response: {e}")
+                    });
+                    let gcc_blocks = response.conference_create_response.gcc_blocks();
+                    let channels = ServerChannels {
+                        io: gcc_blocks.network.io_channel,
+                        statics: gcc_blocks.network.channel_ids.clone(),
+                        message: gcc_blocks
+                            .message_channel
+                            .as_ref()
+                            .map(|data| data.mcs_message_channel_id),
+                    };
+
+                    if let Some(expected) = checks.expected_channels {
+                        // oracle: spec MS-RDPBCGR §1.3.1.1 (the client joins the channels the GCC packets advertise)
+                        assert_eq!(
+                            &channels, expected,
+                            "the server advertised channels other than the ones the replayed handshake joins"
+                        );
                     }
+                    checks.channels = Some(channels);
                 }
                 _ => {
                     let message = decode::<X224<mcs::McsMessage<'_>>>(pdu)
                         .unwrap_or_else(|e| panic!("{state_before} wrote a PDU that is not an MCS message: {e}"))
                         .0;
-                    let expected = if state_before == "ChannelConnection" {
-                        matches!(
-                            message,
-                            mcs::McsMessage::AttachUserConfirm(_) | mcs::McsMessage::ChannelJoinConfirm(_)
-                        )
-                    } else {
-                        matches!(message, mcs::McsMessage::SendDataIndication(_))
-                    };
-                    assert!(expected, "{state_before} wrote an unexpected MCS message: {message:?}");
+                    match (state_before, &message) {
+                        ("ChannelConnection", mcs::McsMessage::AttachUserConfirm(confirm)) => {
+                            if checks.expected_channels.is_some() {
+                                // oracle: spec MS-RDPBCGR §1.3.1.1 (the client joins the user channel the Attach User Confirm assigns)
+                                assert_eq!(
+                                    confirm.initiator_id, USER_CHANNEL_ID,
+                                    "the server assigned a user channel other than the one the replayed handshake joins"
+                                );
+                            }
+                            checks.user_channel_id = Some(confirm.initiator_id);
+                        }
+                        ("ChannelConnection", mcs::McsMessage::ChannelJoinConfirm(confirm)) => {
+                            let Some(channels) = &checks.channels else {
+                                panic!("{state_before} confirmed a channel join before advertising any channel");
+                            };
+                            let advertised = Some(confirm.channel_id) == checks.user_channel_id
+                                || confirm.channel_id == channels.io
+                                || channels.statics.contains(&confirm.channel_id)
+                                || Some(confirm.channel_id) == channels.message;
+                            // oracle: spec MS-RDPBCGR §1.3.1.1 (the server confirms the joins of the channels it advertised)
+                            assert!(
+                                confirm.result != 0 || advertised,
+                                "{state_before} confirmed a join of channel {}, which it never advertised",
+                                confirm.channel_id
+                            );
+                        }
+                        ("CapabilitiesSendServer", mcs::McsMessage::SendDataIndication(data)) => {
+                            let header = decode::<ShareControlHeader>(&data.user_data).unwrap_or_else(|e| {
+                                panic!("{state_before} wrote a PDU that is not a Share Control PDU: {e}")
+                            });
+                            let ShareControlPdu::ServerDemandActive(demand_active) = header.share_control_pdu else {
+                                panic!(
+                                    "{state_before} wrote a {} instead of a Demand Active",
+                                    header.share_control_pdu.as_short_name()
+                                );
+                            };
+                            let size = demand_active
+                                .pdu
+                                .capability_sets
+                                .iter()
+                                .find_map(|capability_set| match capability_set {
+                                    CapabilitySet::Bitmap(bitmap) => Some(DesktopSize {
+                                        width: bitmap.desktop_width,
+                                        height: bitmap.desktop_height,
+                                    }),
+                                    _ => None,
+                                })
+                                .unwrap_or_else(|| {
+                                    panic!("{state_before} wrote a Demand Active without a Bitmap Capability Set")
+                                });
 
-                    if let (Some(size), "CapabilitiesSendServer", mcs::McsMessage::SendDataIndication(data)) =
-                        (demand_active_size, state_before, &message)
-                    {
-                        check_demand_active_size(&data.user_data, size);
+                            // oracle: spec crates/ironrdp-acceptor/src/connection.rs §set_honor_client_desktop_size
+                            match checks.desktop_size {
+                                DesktopSizeRule::Exact(expected) => assert_eq!(
+                                    size, expected,
+                                    "{state_before} advertised a desktop size other than the expected one"
+                                ),
+                                DesktopSizeRule::AtMost(max) => assert!(
+                                    size.width <= max.width && size.height <= max.height,
+                                    "{state_before} advertised {size:?}, larger than the maximum {max:?}"
+                                ),
+                            }
+                            checks.advertised_desktop_size = Some(size);
+                        }
+                        ("MonitorLayoutSend", mcs::McsMessage::SendDataIndication(data)) => {
+                            let header = decode::<ShareControlHeader>(&data.user_data).unwrap_or_else(|e| {
+                                panic!("{state_before} wrote a PDU that is not a Share Control PDU: {e}")
+                            });
+                            let ShareControlPdu::Data(ShareDataHeader {
+                                share_data_pdu: ShareDataPdu::MonitorLayout(layout),
+                                ..
+                            }) = header.share_control_pdu
+                            else {
+                                panic!(
+                                    "{state_before} wrote a {} instead of a Monitor Layout PDU",
+                                    header.share_control_pdu.as_short_name()
+                                );
+                            };
+
+                            // oracle: spec MS-RDPBCGR §2.2.1.3.6.1 (the upper-left corner of the primary monitor is always (0, 0))
+                            assert!(
+                                layout
+                                    .monitors
+                                    .iter()
+                                    .any(|monitor| monitor.flags.contains(MonitorFlags::PRIMARY)
+                                        && monitor.left == 0
+                                        && monitor.top == 0),
+                                "{state_before} wrote a monitor layout without a primary monitor at (0, 0)"
+                            );
+
+                            let advertised = checks.advertised_desktop_size.unwrap_or_else(|| {
+                                panic!("{state_before} wrote a monitor layout before any Demand Active")
+                            });
+                            let left = layout.monitors.iter().map(|monitor| i64::from(monitor.left)).min();
+                            let top = layout.monitors.iter().map(|monitor| i64::from(monitor.top)).min();
+                            let right = layout.monitors.iter().map(|monitor| i64::from(monitor.right)).max();
+                            let bottom = layout.monitors.iter().map(|monitor| i64::from(monitor.bottom)).max();
+                            // oracle: reference Win32 virtual screen (the desktop is the bounding rectangle of all monitors, whose right and bottom edges MS-RDPBCGR §2.2.1.3.6.1 makes inclusive)
+                            assert_eq!(
+                                left.zip(right).map(|(left, right)| right - left + 1),
+                                Some(i64::from(advertised.width)),
+                                "{state_before} wrote a monitor layout narrower or wider than the advertised desktop"
+                            );
+                            assert_eq!(
+                                top.zip(bottom).map(|(top, bottom)| bottom - top + 1),
+                                Some(i64::from(advertised.height)),
+                                "{state_before} wrote a monitor layout shorter or taller than the advertised desktop"
+                            );
+                        }
+                        (state, mcs::McsMessage::SendDataIndication(_)) if state != "ChannelConnection" => {}
+                        _ => panic!("{state_before} wrote an unexpected MCS message: {message:?}"),
                     }
                 }
             }
@@ -318,6 +447,7 @@ pub fn acceptor_state_machine(data: &[u8]) {
             return false;
         };
 
+        // oracle: reference crates/ironrdp-async/src/framed.rs §single_sequence_step_write (the driver sends exactly the size a step reports)
         assert_eq!(
             output.filled_len(),
             written.size().unwrap_or(0),
@@ -326,45 +456,13 @@ pub fn acceptor_state_machine(data: &[u8]) {
         );
 
         let state_after = acceptor.state().name();
+        // oracle: spec MS-RDPBCGR §1.3.1.1 (the phases of the connection sequence are strictly sequential)
         assert!(
             sequence_position(state_before) <= sequence_position(state_after),
             "the acceptor moved backwards from {state_before} to {state_after}"
         );
 
         true
-    }
-
-    /// Checks that a Demand Active advertises `size` in its Bitmap Capability Set.
-    fn check_demand_active_size(user_data: &[u8], size: DesktopSize) {
-        let header = decode::<ShareControlHeader>(user_data)
-            .unwrap_or_else(|e| panic!("CapabilitiesSendServer wrote a PDU that is not a Share Control PDU: {e}"));
-        let ShareControlPdu::ServerDemandActive(demand_active) = header.share_control_pdu else {
-            panic!(
-                "CapabilitiesSendServer wrote a {} instead of a Demand Active",
-                header.share_control_pdu.as_short_name()
-            );
-        };
-
-        let mut bitmap_sizes = demand_active
-            .pdu
-            .capability_sets
-            .iter()
-            .filter_map(|capability_set| match capability_set {
-                CapabilitySet::Bitmap(bitmap) => Some((bitmap.desktop_width, bitmap.desktop_height)),
-                _ => None,
-            })
-            .peekable();
-        assert!(
-            bitmap_sizes.peek().is_some(),
-            "CapabilitiesSendServer wrote a Demand Active without a Bitmap Capability Set"
-        );
-        for (width, height) in bitmap_sizes {
-            assert_eq!(
-                (width, height),
-                (size.width, size.height),
-                "CapabilitiesSendServer advertised a desktop size other than the expected one"
-            );
-        }
     }
 
     /// Position of the named state in the connection sequence.
@@ -429,8 +527,7 @@ const MULTITRANSPORT_REQUEST_ID: u32 = 0x1234_5678;
 
 /// Static channels the client asks for when [`Config::STATIC_CHANNELS`] is set.
 ///
-/// The server only has a processor for the first one, so the acceptor assigns
-/// an ID to both but only binds the first.
+/// The server only has a processor for the first one, so the acceptor assigns an ID to both but only binds the first.
 const CLIENT_STATIC_CHANNELS: [&[u8; 8]; 2] = [b"fuzzsvc\0", b"unknown\0"];
 
 /// Variations of the handshake, selected by the second input byte.
@@ -440,8 +537,8 @@ struct Config(u8);
 impl Config {
     /// The client requests an MCS message channel.
     const MESSAGE_CHANNEL: u8 = 1 << 0;
-    /// Both sides advertise UDP multitransport. With a message channel, the
-    /// server sends an Initiate Multitransport Request and the client answers.
+    /// Both sides advertise UDP multitransport.
+    /// With a message channel, the server sends an Initiate Multitransport Request and the client answers.
     const MULTITRANSPORT: u8 = 1 << 1;
     /// The client supports skipping the MCS channel joins.
     const SKIP_CHANNEL_JOIN: u8 = 1 << 2;
@@ -451,11 +548,10 @@ impl Config {
     const STATIC_CHANNELS: u8 = 1 << 4;
     /// The server adopts the desktop size the client asks for.
     const HONOR_DESKTOP_SIZE: u8 = 1 << 5;
-    /// The server accepts any credentials. Otherwise it expects the ones the
-    /// valid handshake sends, so the oracle can check it never accepts others.
+    /// The server accepts any credentials.
+    /// Otherwise it expects the ones the valid handshake sends, so the oracle can check it never accepts others.
     const ANY_CREDENTIALS: u8 = 1 << 6;
-    /// After accepting the connection, the server runs a
-    /// Deactivation-Reactivation Sequence, and the client answers it.
+    /// After accepting the connection, the server runs a Deactivation-Reactivation Sequence, and the client answers it.
     const REACTIVATION: u8 = 1 << 7;
 
     fn has(self, flag: u8) -> bool {
@@ -467,9 +563,10 @@ impl Config {
 struct ClientHandshake {
     /// Frames up to the accepted connection.
     connection: Vec<ClientFrame>,
-    /// Frames answering a Deactivation-Reactivation Sequence, empty unless
-    /// [`Config::REACTIVATION`] is set.
+    /// Frames answering a Deactivation-Reactivation Sequence, empty unless [`Config::REACTIVATION`] is set.
     reactivation: Vec<ClientFrame>,
+    /// Channels the handshake joins, which the server must advertise.
+    channels: ServerChannels,
 }
 
 impl ClientHandshake {
@@ -486,6 +583,37 @@ struct ClientFrame {
     bytes: Vec<u8>,
 }
 
+/// Channels a Connect Response advertises: the I/O channel, the static virtual channels and the message channel.
+#[derive(Debug, PartialEq, Eq)]
+struct ServerChannels {
+    io: u16,
+    statics: Vec<u16>,
+    message: Option<u16>,
+}
+
+/// What the server advertised so far, and what it must advertise next.
+struct OutputChecks<'a> {
+    /// Channels the server must advertise, known when the Connect Initial that decides them is the replayed one.
+    expected_channels: Option<&'a ServerChannels>,
+    /// Desktop size the next Demand Active must advertise.
+    desktop_size: DesktopSizeRule,
+    /// Channels the Connect Response advertised.
+    channels: Option<ServerChannels>,
+    /// User channel the Attach User Confirm assigned.
+    user_channel_id: Option<u16>,
+    /// Desktop size the last Demand Active advertised.
+    advertised_desktop_size: Option<DesktopSize>,
+}
+
+/// Desktop size a Demand Active must advertise.
+#[derive(Clone, Copy)]
+enum DesktopSizeRule {
+    /// Exactly this size.
+    Exact(DesktopSize),
+    /// Any size no larger than this one in either dimension.
+    AtMost(DesktopSize),
+}
+
 /// Builds the valid client side of a TLS connection sequence for `config`.
 fn client_handshake(config: Config) -> ClientHandshake {
     let static_channels: &[&[u8; 8]] = if config.has(Config::STATIC_CHANNELS) {
@@ -494,11 +622,16 @@ fn client_handshake(config: Config) -> ClientHandshake {
         &[]
     };
 
-    // The acceptor numbers every channel the client asks for after the I/O
-    // channel, in request order, then allocates the message channel.
+    // The channel joins are built before the server assigns any ID, so they assume the acceptor's numbering: every
+    // channel the client asks for after the I/O channel, in request order, then the message channel.
+    // The oracle checks this assumption against the Connect Response, so a change in numbering fails there rather than
+    // as a rejected join.
     let mut next_channel_ids = IO_CHANNEL_ID + 1..;
-    let static_channel_ids: Vec<u16> = next_channel_ids.by_ref().take(static_channels.len()).collect();
-    let message_channel_id = config.has(Config::MESSAGE_CHANNEL).then_some(next_channel_ids.start);
+    let channels = ServerChannels {
+        io: IO_CHANNEL_ID,
+        statics: next_channel_ids.by_ref().take(static_channels.len()).collect(),
+        message: config.has(Config::MESSAGE_CHANNEL).then_some(next_channel_ids.start),
+    };
 
     let mut early_capability_flags =
         ClientEarlyCapabilityFlags::SUPPORT_ERR_INFO_PDU | ClientEarlyCapabilityFlags::WANT_32_BPP_SESSION;
@@ -589,10 +722,10 @@ fn client_handshake(config: Config) -> ClientHandshake {
     ];
 
     if !config.has(Config::SKIP_CHANNEL_JOIN) {
-        let channel_ids = [USER_CHANNEL_ID, IO_CHANNEL_ID]
+        let channel_ids = [USER_CHANNEL_ID, channels.io]
             .into_iter()
-            .chain(static_channel_ids)
-            .chain(message_channel_id);
+            .chain(channels.statics.iter().copied())
+            .chain(channels.message);
         frames.extend(channel_ids.map(|channel_id| ClientFrame {
             state: "ChannelConnection",
             bytes: encode_frame(&X224(mcs::ChannelJoinRequest {
@@ -629,9 +762,9 @@ fn client_handshake(config: Config) -> ClientHandshake {
         ),
     });
 
-    // The server only sends an Initiate Multitransport Request on the message
-    // channel; the client answers before reading the Demand Active.
-    if let Some(message_channel_id) = message_channel_id.filter(|_| config.has(Config::MULTITRANSPORT)) {
+    // The server only sends an Initiate Multitransport Request on the message channel; the client answers before
+    // reading the Demand Active.
+    if let Some(message_channel_id) = channels.message.filter(|_| config.has(Config::MULTITRANSPORT)) {
         frames.push(ClientFrame {
             state: "CapabilitiesWaitConfirm",
             bytes: send_data_request(
@@ -647,8 +780,8 @@ fn client_handshake(config: Config) -> ClientHandshake {
         });
     }
 
-    // The client answers every Demand Active the same way, whether it comes
-    // during the connection sequence or a Deactivation-Reactivation Sequence.
+    // The client answers every Demand Active the same way, whether it comes during the connection sequence or a
+    // Deactivation-Reactivation Sequence.
     let mut activation = vec![ClientFrame {
         state: "CapabilitiesWaitConfirm",
         bytes: send_data_request(
@@ -710,6 +843,7 @@ fn client_handshake(config: Config) -> ClientHandshake {
     return ClientHandshake {
         connection: frames,
         reactivation,
+        channels,
     };
 
     fn encode_frame(pdu: &dyn Encode) -> Vec<u8> {
@@ -743,8 +877,8 @@ fn client_credentials() -> Credentials {
     }
 }
 
-/// Deterministic security cookie and request ID, so the same input always
-/// produces the same Initiate Multitransport Request.
+/// Deterministic security cookie and request ID, so the same input always produces the same Initiate Multitransport
+/// Request.
 struct FixedSecurityRng;
 
 impl MultitransportSecurityRng for FixedSecurityRng {

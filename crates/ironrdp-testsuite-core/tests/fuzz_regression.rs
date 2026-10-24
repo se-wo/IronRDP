@@ -108,7 +108,31 @@ fn check_rdpsnd_codec_decode() {
     check!(rdpsnd_codec_decode);
 }
 
+// oracle: spec MS-RDPBCGR §1.3.1.1 (a seed holds a valid connection sequence from the state it names on, so the server accepts it)
 #[test]
+#[expect(
+    clippy::print_stdout,
+    reason = "names each input before the oracle runs, as `check!` does, so a panic points at its file"
+)]
 fn check_acceptor_state_machine() {
-    check!(acceptor_state_machine);
+    const REGRESSION_DATA_FOLDER: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/test_data/fuzz_regression/acceptor_state_machine"
+    );
+
+    // Seeds must get through the whole handshake, while other regression inputs only must not panic.
+    for entry in std::fs::read_dir(REGRESSION_DATA_FOLDER).unwrap() {
+        let path = entry.unwrap().path();
+        println!("Check {}", path.display());
+        let accepted = ironrdp_fuzzing::oracles::acceptor_state_machine(&std::fs::read(&path).unwrap());
+        let is_seed = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("seed-"));
+        assert!(
+            accepted || !is_seed,
+            "{} holds a valid handshake, but the acceptor did not accept it",
+            path.display()
+        );
+    }
 }
