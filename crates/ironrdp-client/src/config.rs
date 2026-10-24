@@ -1,7 +1,6 @@
 use core::fmt;
 use core::str::FromStr;
 use core::time::Duration;
-#[cfg(all(windows, feature = "dvc-com-plugin"))]
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -10,6 +9,10 @@ use ironrdp_cfg::PropertySetExt as _;
 use ironrdp_propertyset::PropertySet;
 use ironrdp_rail::pdu::ExecutePdu;
 use url::Url;
+
+/// Local drive selection, as configured with [`ConfigBuilder::with_drive_redirection`].
+#[cfg(feature = "rdpdr")]
+pub use ironrdp_cfg::DriveRedirection;
 
 /// RDP-UDP protocol version, as offered with [`ConfigBuilder::with_udp_offer_version`].
 #[cfg(feature = "udp")]
@@ -112,12 +115,18 @@ pub struct Config {
     pub(crate) input_send_interval: Option<Duration>,
     pub(crate) input_keepalive_interval: Option<Duration>,
     pub(crate) fake_events_interval: Option<Duration>,
+    pub(crate) tcp_connect_attempt_timeout: Option<Duration>,
     pub(crate) channels: ChannelConfig,
     pub(crate) administrative_session: bool,
     pub(crate) load_balance_info: Option<String>,
+    /// Whether a server redirection connects to the target by name rather than by address.
+    pub(crate) use_redirection_server_name: bool,
+    /// What the last Server Redirection PDU changed for the next connection attempts.
+    pub(crate) redirection: Option<crate::redirection::RedirectionHop>,
     #[cfg(any(feature = "sound", feature = "rdpdr"))]
     pub(crate) audio_quality_mode: AudioQualityMode,
     pub(crate) rail_client_status_flags: Option<u32>,
+    pub(crate) rail_system_parameters: Option<Vec<ironrdp_rail::pdu::ClientSystemParameter>>,
     /// Initial RemoteApp launch queued after the RAIL handshake.
     pub(crate) rail_initial_execute: Option<ExecutePdu>,
 
@@ -231,6 +240,11 @@ impl Config {
         self.fake_events_interval
     }
 
+    /// Maximum time a direct connection waits for one resolved server address to accept TCP.
+    pub fn tcp_connect_attempt_timeout(&self) -> Option<Duration> {
+        self.tcp_connect_attempt_timeout
+    }
+
     /// Channel/codec runtime toggles.
     pub fn channels(&self) -> &ChannelConfig {
         &self.channels
@@ -244,6 +258,12 @@ impl Config {
     /// Opaque load-balancing data sent in the initial X.224 Connection Request.
     pub fn load_balance_info(&self) -> Option<&str> {
         self.load_balance_info.as_deref()
+    }
+
+    /// Whether a server redirection connects to the target by name rather than by address
+    /// (`use redirection server name`).
+    pub fn use_redirection_server_name(&self) -> bool {
+        self.use_redirection_server_name
     }
 
     /// RDPSND quality policy sent during audio format negotiation.
@@ -307,12 +327,16 @@ impl fmt::Debug for Config {
         s.field("input_send_interval", &self.input_send_interval);
         s.field("input_keepalive_interval", &self.input_keepalive_interval);
         s.field("fake_events_interval", &self.fake_events_interval);
+        s.field("tcp_connect_attempt_timeout", &self.tcp_connect_attempt_timeout);
         s.field("channels", &self.channels);
         s.field("administrative_session", &self.administrative_session);
         s.field("load_balance_info", &self.load_balance_info);
+        s.field("use_redirection_server_name", &self.use_redirection_server_name);
+        s.field("redirection", &self.redirection);
         #[cfg(any(feature = "sound", feature = "rdpdr"))]
         s.field("audio_quality_mode", &self.audio_quality_mode);
         s.field("rail_client_status_flags", &self.rail_client_status_flags);
+        s.field("rail_system_parameters", &self.rail_system_parameters);
         #[cfg(feature = "dvc-pipe-proxy")]
         s.field("dvc_pipe_proxies", &self.dvc_pipe_proxies);
         #[cfg(all(windows, feature = "dvc-com-plugin"))]
@@ -361,6 +385,10 @@ pub struct ChannelConfig {
     #[cfg(feature = "sound")]
     pub audio_capture: bool,
 
+    /// Audio devices and playback buffering.
+    #[cfg(feature = "sound")]
+    pub audio: crate::audio::AudioConfig,
+
     /// Clipboard redirection mode.
     #[cfg(feature = "clipboard")]
     pub clipboard: ClipboardType,
@@ -387,21 +415,42 @@ pub struct ChannelConfig {
     /// Enable the MS-RDPEL location dynamic virtual channel.
     #[cfg(feature = "location")]
     pub location: bool,
+
+    /// Maximum number of simultaneous touch contacts advertised in the RDPEI `CS_READY` PDU.
+    ///
+    /// Defaults to [`RDPEI_MAX_TOUCH_CONTACTS`](crate::rdp::RDPEI_MAX_TOUCH_CONTACTS).
+    pub max_touch_contacts: u16,
+
+    /// MS-RDPECAM camera redirection (`camerastoredirect`). No camera is redirected by default.
+    #[cfg(feature = "camera")]
+    pub cameras: crate::camera::CameraConfig,
+
+    /// MS-RDPEVOR video optimized remoting, enabled when an H.264 decoder is available unless
+    /// `videoplaybackmode:i:0` turns it off.
+    #[cfg(feature = "video")]
+    pub video: crate::video::VideoConfig,
+
+    /// Local USB devices to redirect over MS-RDPEUSB (URBDRC), or `None` to disable the channel.
+    #[cfg(feature = "usb")]
+    pub usb: Option<ironrdp_rdpeusb_native::UsbRedirectionConfig>,
+
+    /// H.264 decoder for the graphics pipeline and video optimized remoting.
+    ///
+    /// Defaults to [`crate::h264::H264DecoderFactory::platform_default`]: Media Foundation's on
+    /// Windows, or OpenH264 with the `openh264` feature.
+    pub h264_decoder: Option<crate::h264::H264DecoderFactory>,
+    /// File keeping the graphics pipeline's bitmap cache across sessions ([MS-RDPEGFX] 3.3.1.5),
+    /// so a reconnect paints from cached tiles instead of waiting for the server to resend them.
+    /// `None` keeps the cache in memory only.
+    ///
+    /// Defaults to `None`, unlike mstsc, which persists the cache unless told not to
+    /// (`BitmapPersistenceEnabled` defaults to on there); [`crate::egfx_cache::default_cache_path`]
+    /// gives the per-user location to opt in with.
+    ///
+    /// [MS-RDPEGFX]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpegfx/da5c75f9-cd99-450c-98c4-014a496942b0
+    pub egfx_persistent_cache: Option<PathBuf>,
 }
 
-#[cfg_attr(
-    not(any(
-        feature = "sound",
-        feature = "clipboard",
-        feature = "qoi",
-        feature = "qoiz",
-        feature = "webauthn"
-    )),
-    expect(
-        clippy::derivable_impls,
-        reason = "fields setting non-default values are feature-gated; the impl is only trivially derivable in some feature combinations"
-    )
-)]
 impl Default for ChannelConfig {
     fn default() -> Self {
         Self {
@@ -409,6 +458,8 @@ impl Default for ChannelConfig {
             sound: true,
             #[cfg(feature = "sound")]
             audio_capture: false,
+            #[cfg(feature = "sound")]
+            audio: crate::audio::AudioConfig::default(),
             #[cfg(feature = "clipboard")]
             clipboard: ClipboardType::Enable,
             #[cfg(feature = "rdpdr")]
@@ -421,6 +472,15 @@ impl Default for ChannelConfig {
             webauthn: true,
             #[cfg(feature = "location")]
             location: false,
+            max_touch_contacts: crate::rdp::RDPEI_MAX_TOUCH_CONTACTS,
+            #[cfg(feature = "camera")]
+            cameras: crate::camera::CameraConfig::default(),
+            #[cfg(feature = "video")]
+            video: crate::video::VideoConfig::default(),
+            #[cfg(feature = "usb")]
+            usb: None,
+            h264_decoder: crate::h264::H264DecoderFactory::platform_default(),
+            egfx_persistent_cache: None,
         }
     }
 }
@@ -435,6 +495,24 @@ pub struct RdpdrConfig {
     /// Enable smart-card redirection within RDPDR.
     #[cfg(feature = "smartcard")]
     pub smartcard: bool,
+
+    /// Local drives requested for redirection.
+    ///
+    /// The client does not enumerate drives itself: frontends read this selection to configure
+    /// their native RDPDR backend factory.
+    pub drives: DriveRedirection,
+
+    /// Announce the serial and parallel ports the RDPDR backend factory provides.
+    ///
+    /// Mirrors the `.rdp` `redirectcomports` property. Which local ports exist and are
+    /// selected is up to the factory; this only gates their announcement.
+    pub ports: bool,
+
+    /// Allow printers from the RDPDR backend product to be announced.
+    ///
+    /// Mirrors the `.rdp` `redirectprinters` property. The backend factory still decides which
+    /// printers exist; this only lets the connection drop them.
+    pub printers: bool,
 }
 
 #[cfg(feature = "rdpdr")]
@@ -444,6 +522,9 @@ impl Default for RdpdrConfig {
             enabled: true,
             #[cfg(feature = "smartcard")]
             smartcard: true,
+            drives: DriveRedirection::default(),
+            ports: true,
+            printers: true,
         }
     }
 }
@@ -467,6 +548,13 @@ pub enum Transport {
     /// endpoint and credentials.
     #[cfg(feature = "gateway")]
     Gateway(GatewayConfig),
+
+    /// Connect via an RDS gateway using authenticated RPC over HTTP (MS-RPCH).
+    ///
+    /// This opt-in path does not fall back to unsigned RPC. IN and OUT channels are recycled
+    /// before their finite lifetimes end.
+    #[cfg(feature = "gateway")]
+    GatewayRpch(GatewayConfig),
 
     /// Connect via an RDCleanPath proxy (WebSocket-based).
     RDCleanPath(RDCleanPathConfig),
@@ -511,6 +599,19 @@ pub enum TransportKind {
         endpoint: String,
         /// When `true` (`GatewayUsageMethod::Detect`), try a direct TCP connection first and fall
         /// back to the gateway only if that fails.
+        prefer_direct: bool,
+    },
+
+    /// Connect through an RDS gateway using authenticated RPC over HTTP (MS-RPCH).
+    ///
+    /// This path is selected only explicitly and does not fall back to unsigned RPC. IN and OUT
+    /// channels are recycled before their finite lifetimes end.
+    #[cfg(feature = "gateway")]
+    GatewayRpch {
+        /// Gateway endpoint address (e.g., `"rdg.contoso.com:443"`).
+        endpoint: String,
+        /// When `true` (`GatewayUsageMethod::Detect`), try a direct TCP connection first and fall
+        /// back to RPCH only if that fails.
         prefer_direct: bool,
     },
 
@@ -773,7 +874,12 @@ pub struct ConfigBuilder {
     desktop_width: Option<u16>,
     desktop_height: Option<u16>,
     monitor_layout: Option<ironrdp_pdu::gcc::ClientMonitorData>,
+    monitor_extended_layout: Option<ironrdp_pdu::gcc::ClientMonitorExtendedData>,
+    relative_mouse_input: bool,
     desktop_scale_factor: Option<u32>,
+    device_scale_factor: Option<u32>,
+    desktop_physical_size: Option<(u32, u32)>,
+    desktop_orientation: Option<ironrdp_pdu::gcc::MonitorOrientation>,
     color_depth: Option<u32>,
     lossy_compression: Option<bool>,
     codecs: Vec<String>,
@@ -786,6 +892,7 @@ pub struct ConfigBuilder {
     compression_type: Option<ironrdp_pdu::rdp::client_info::CompressionType>,
     compression_enabled: Option<bool>,
     load_balance_info: Option<String>,
+    use_redirection_server_name: bool,
     administrative_session: bool,
     alternate_shell: Option<String>,
     work_dir: Option<String>,
@@ -793,13 +900,14 @@ pub struct ConfigBuilder {
     remote_application_program: Option<String>,
     rail_support_level: Option<ironrdp_pdu::rdp::capability_sets::RailSupportLevel>,
     rail_client_status_flags: Option<u32>,
+    rail_system_parameters: Option<Vec<ironrdp_rail::pdu::ClientSystemParameter>>,
 
     transport: TransportKind,
     #[cfg(feature = "udp")]
     udp_transport_enabled: bool,
     #[cfg(feature = "udp")]
     udp_offer_version: Option<UdpVersion>,
-    graphics_pipeline: bool,
+    graphics_pipeline: Option<bool>,
     #[cfg(feature = "vmconnect")]
     vm_id: Option<String>,
     #[cfg(feature = "vmconnect")]
@@ -811,6 +919,7 @@ pub struct ConfigBuilder {
     input_send_interval: Option<Duration>,
     input_keepalive_interval: Option<Duration>,
     fake_events_interval: Option<Duration>,
+    tcp_connect_attempt_timeout: Option<Duration>,
     channels: ChannelConfig,
     #[cfg(any(feature = "sound", feature = "rdpdr"))]
     audio_quality_mode: Option<AudioQualityMode>,
@@ -1008,6 +1117,52 @@ impl ConfigBuilder {
         self
     }
 
+    /// Advertise per-monitor physical size, orientation and scale in the GCC Client Monitor
+    /// Extended Data block.
+    ///
+    /// The block is sent only with a [monitor layout](Self::with_monitor_layout), and must list
+    /// the same monitors in the same order.
+    #[must_use]
+    pub fn with_monitor_extended_layout(
+        mut self,
+        monitor_extended_layout: ironrdp_pdu::gcc::ClientMonitorExtendedData,
+    ) -> Self {
+        self.monitor_extended_layout = Some(monitor_extended_layout);
+        self
+    }
+
+    /// Set the device scale factor (100, 140 or 180) to request. Upserts the `devicescalefactor`
+    /// property.
+    ///
+    /// This becomes the `deviceScaleFactor` in the `TS_UD_CS_CORE` GCC structure, which servers
+    /// honor only alongside a valid [desktop scale factor](Self::with_desktop_scale_factor).
+    /// [`build`](Self::build) rejects any other value.
+    #[must_use]
+    pub fn with_device_scale_factor(mut self, scale: u32) -> Self {
+        self.device_scale_factor = Some(scale);
+        self.properties.insert("devicescalefactor", scale);
+        self
+    }
+
+    /// Set the physical size of the desktop in millimeters.
+    ///
+    /// This becomes `desktopPhysicalWidth` and `desktopPhysicalHeight` in the `TS_UD_CS_CORE` GCC
+    /// structure. Servers ignore sizes outside 10 to 10,000 millimeters.
+    #[must_use]
+    pub fn with_desktop_physical_size(mut self, width: u32, height: u32) -> Self {
+        self.desktop_physical_size = Some((width, height));
+        self
+    }
+
+    /// Set the desktop orientation, instead of deriving landscape or portrait from the desktop size.
+    ///
+    /// This becomes `desktopOrientation` in the `TS_UD_CS_CORE` GCC structure.
+    #[must_use]
+    pub fn with_desktop_orientation(mut self, orientation: ironrdp_pdu::gcc::MonitorOrientation) -> Self {
+        self.desktop_orientation = Some(orientation);
+        self
+    }
+
     /// Enable or disable TLS + Network Level Authentication (NLA) using CredSSP. Upserts the
     /// `enablecredsspsupport` property.
     ///
@@ -1052,6 +1207,18 @@ impl ConfigBuilder {
             self.properties.insert("loadbalanceinfo", value.clone());
             self.load_balance_info = Some(normalized.to_owned());
         }
+        self
+    }
+
+    /// Connect to the target of a server redirection by name rather than by address.
+    ///
+    /// Upserts the `use redirection server name` property, which mirrors the mstsc ActiveX
+    /// `UseRedirectionServerName` property. By default a direct connection follows a redirection to the target's IP
+    /// address first; connections through a gateway or an RDCleanPath proxy always prefer the name.
+    #[must_use]
+    pub fn with_use_redirection_server_name(mut self, enabled: bool) -> Self {
+        self.use_redirection_server_name = enabled;
+        self.properties.insert("use redirection server name", enabled);
         self
     }
 
@@ -1123,6 +1290,14 @@ impl ConfigBuilder {
     #[must_use]
     pub fn with_rail_client_status_flags(mut self, flags: u32) -> Self {
         self.rail_client_status_flags = Some(flags);
+        self
+    }
+
+    /// Overrides the RAIL client system parameters sent during channel initialization,
+    /// typically with the local desktop's values.
+    #[must_use]
+    pub fn with_rail_system_parameters(mut self, parameters: Vec<ironrdp_rail::pdu::ClientSystemParameter>) -> Self {
+        self.rail_system_parameters = Some(parameters);
         self
     }
 
@@ -1244,9 +1419,12 @@ impl ConfigBuilder {
     /// [`with_rdcleanpath_token`](Self::with_rdcleanpath_token).
     /// A `gatewaycredentialssource` property of
     /// [`UseServerCredentials`](ironrdp_cfg::GatewayCredentialsSource::UseServerCredentials)
-    /// resolves unspecified gateway credentials from the RDP server account.
+    /// resolves unspecified gateway credentials from the RDP server account. Standard gateway
+    /// properties select HTTP/WebSocket; `GatewayRpch` sets the IronRDP-specific
+    /// `ironrdp_gatewayrpch:i:1` opt-in.
     #[must_use]
     pub fn with_transport(mut self, transport: TransportKind) -> Self {
+        self.properties.remove("ironrdp_gatewayrpch");
         match &transport {
             TransportKind::Direct => {
                 self.properties.clear_rdcleanpath();
@@ -1264,6 +1442,10 @@ impl ConfigBuilder {
             TransportKind::Gateway {
                 endpoint,
                 prefer_direct,
+            }
+            | TransportKind::GatewayRpch {
+                endpoint,
+                prefer_direct,
             } => {
                 self.properties.clear_rdcleanpath();
                 #[cfg(windows)]
@@ -1274,6 +1456,9 @@ impl ConfigBuilder {
                 } else {
                     ironrdp_cfg::GatewayUsageMethod::UseAlways
                 });
+                if matches!(transport, TransportKind::GatewayRpch { .. }) {
+                    self.properties.insert("ironrdp_gatewayrpch", 1i64);
+                }
             }
             #[cfg(windows)]
             TransportKind::NamedPipe { path } => {
@@ -1309,15 +1494,27 @@ impl ConfigBuilder {
         self
     }
 
-    /// Advertises the graphics pipeline ([MS-RDPEGFX]) to the server. Off by default.
+    /// Advertises the graphics pipeline ([MS-RDPEGFX]) to the server.
     ///
-    /// Without it, the server keeps graphics on the legacy bitmap path, which travels on the
-    /// main connection and cannot move to a reliable UDP tunnel.
+    /// On by default when an H.264 decoder is configured ([`Self::with_h264_decoder`]), so the
+    /// server can send AVC420 and AVC444; `false` opts out. Without it, the server keeps graphics
+    /// on the legacy bitmap path, which travels on the main connection and cannot move to a
+    /// reliable UDP tunnel.
     ///
     /// [MS-RDPEGFX]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpegfx/
     #[must_use]
     pub fn with_graphics_pipeline(mut self, enabled: bool) -> Self {
-        self.graphics_pipeline = enabled;
+        self.graphics_pipeline = Some(enabled);
+        self
+    }
+
+    /// Keep the graphics pipeline's bitmap cache in `path` across sessions, or only in memory with
+    /// `None` (the default). [`crate::egfx_cache::default_cache_path`] gives a per-user location.
+    ///
+    /// See [`ChannelConfig::egfx_persistent_cache`].
+    #[must_use]
+    pub fn with_egfx_persistent_cache(mut self, path: Option<PathBuf>) -> Self {
+        self.channels.egfx_persistent_cache = path;
         self
     }
 
@@ -1417,6 +1614,18 @@ impl ConfigBuilder {
         self
     }
 
+    /// Bound each TCP connection attempt of a direct connection.
+    ///
+    /// The destination host name is resolved first, then each address is tried in order, and an
+    /// address that does not accept the connection within `timeout` is abandoned for the next one.
+    /// Without this setting the operating system's connect timeout applies to each address.
+    /// [`build`](Self::build) rejects a zero timeout.
+    #[must_use]
+    pub fn with_tcp_connect_attempt_timeout(mut self, timeout: Duration) -> Self {
+        self.tcp_connect_attempt_timeout = Some(timeout);
+        self
+    }
+
     /// Enable or disable RDPSND (audio) playback.
     #[cfg(feature = "sound")]
     #[must_use]
@@ -1456,6 +1665,56 @@ impl ConfigBuilder {
         self
     }
 
+    /// Set the audio output device: a device ID or (part of) a device name; `None` follows the
+    /// system default device.
+    #[cfg(feature = "sound")]
+    #[must_use]
+    pub fn with_audio_output_device(mut self, device: Option<String>) -> Self {
+        match &device {
+            Some(device) => self
+                .properties
+                .insert(crate::audio::OUTPUT_DEVICE_PROPERTY, device.clone()),
+            None => self.properties.remove(crate::audio::OUTPUT_DEVICE_PROPERTY),
+        };
+        self.channels.audio.output_device = device;
+        self
+    }
+
+    /// Set the audio input (microphone) device: a device ID or (part of) a device name; `None`
+    /// follows the system default device.
+    #[cfg(feature = "sound")]
+    #[must_use]
+    pub fn with_audio_input_device(mut self, device: Option<String>) -> Self {
+        match &device {
+            Some(device) => self
+                .properties
+                .insert(crate::audio::INPUT_DEVICE_PROPERTY, device.clone()),
+            None => self.properties.remove(crate::audio::INPUT_DEVICE_PROPERTY),
+        };
+        self.channels.audio.input_device = device;
+        self
+    }
+
+    /// Set the audio kept buffered ahead of the output device (100 ms by default).
+    ///
+    /// Higher values ride out more network jitter at the cost of audio delay.
+    #[cfg(feature = "sound")]
+    #[must_use]
+    pub fn with_audio_latency(mut self, latency: Duration) -> Self {
+        self.properties.insert(
+            crate::audio::LATENCY_PROPERTY,
+            i64::try_from(latency.as_millis()).unwrap_or(i64::MAX),
+        );
+        self.channels.audio.latency = Some(latency);
+        self
+    }
+
+    /// Audio device and buffering settings.
+    #[cfg(feature = "sound")]
+    pub fn audio(&self) -> &crate::audio::AudioConfig {
+        &self.channels.audio
+    }
+
     /// Set the RDPSND quality policy sent to servers supporting audio protocol version 6 or newer.
     #[cfg(any(feature = "sound", feature = "rdpdr"))]
     #[must_use]
@@ -1481,6 +1740,33 @@ impl ConfigBuilder {
     pub fn with_rdpdr(mut self, enabled: bool) -> Self {
         self.channels.rdpdr.enabled = enabled;
         self.properties.set_enable_rdpdr(enabled);
+        self
+    }
+
+    /// Selects the local drives to redirect (`drivestoredirect`).
+    #[cfg(feature = "rdpdr")]
+    #[must_use]
+    pub fn with_drive_redirection(mut self, drives: DriveRedirection) -> Self {
+        self.channels.rdpdr.drives = drives;
+        self.properties.set_drive_redirection(drives);
+        self
+    }
+
+    /// Enable or disable serial and parallel port redirection within RDPDR (`redirectcomports`).
+    #[cfg(feature = "rdpdr")]
+    #[must_use]
+    pub fn with_ports(mut self, enabled: bool) -> Self {
+        self.channels.rdpdr.ports = enabled;
+        self.properties.set_redirect_com_ports(enabled);
+        self
+    }
+
+    /// Allow or drop printers announced by the RDPDR backend product (`redirectprinters`).
+    #[cfg(feature = "rdpdr")]
+    #[must_use]
+    pub fn with_printers(mut self, enabled: bool) -> Self {
+        self.channels.rdpdr.printers = enabled;
+        self.properties.set_redirect_printers(enabled);
         self
     }
 
@@ -1525,6 +1811,62 @@ impl ConfigBuilder {
     #[must_use]
     pub fn with_location_redirection(mut self, enabled: bool) -> Self {
         self.channels.location = enabled;
+        self
+    }
+
+    /// Advertise that the client sends relative mouse input.
+    ///
+    /// Sets `RNS_UD_CS_RELATIVE_MOUSE_INPUT` in the GCC Client Core Data. Enable it before sending
+    /// relative pointer events.
+    #[must_use]
+    pub fn with_relative_mouse_input(mut self, enabled: bool) -> Self {
+        self.relative_mouse_input = enabled;
+        self
+    }
+
+    /// Set the maximum number of simultaneous touch contacts advertised over RDPEI.
+    ///
+    /// [`build`](Self::build) rejects values outside 1 through 256, the RDPEI limit.
+    #[must_use]
+    pub fn with_max_touch_contacts(mut self, contacts: u16) -> Self {
+        self.channels.max_touch_contacts = contacts;
+        self
+    }
+
+    /// Select the cameras to redirect over MS-RDPECAM.
+    ///
+    /// Capture is only implemented on Windows.
+    #[cfg(feature = "camera")]
+    #[must_use]
+    pub fn with_cameras(mut self, cameras: crate::camera::CameraConfig) -> Self {
+        self.channels.cameras = cameras;
+        self
+    }
+
+    /// Set the H.264 decoder used by the graphics pipeline and MS-RDPEVOR video optimized remoting.
+    ///
+    /// `None` keeps the graphics pipeline to the codecs that need no H.264 decoder, turns it off
+    /// unless [`Self::with_graphics_pipeline`] turns it on, and declines the video channels.
+    #[must_use]
+    pub fn with_h264_decoder(mut self, decoder: Option<crate::h264::H264DecoderFactory>) -> Self {
+        self.channels.h264_decoder = decoder;
+        self
+    }
+
+    /// Cameras currently selected for redirection, e.g. from a `.rdp` file.
+    #[cfg(feature = "camera")]
+    pub fn cameras(&self) -> &crate::camera::CameraConfig {
+        &self.channels.cameras
+    }
+
+    /// Select the local USB devices to redirect over MS-RDPEUSB, or disable USB redirection with `None`.
+    ///
+    /// This is not mirrored into the property set: FreeRDP-style `addr:` and `auto` rules have no
+    /// `usbdevicestoredirect` equivalent.
+    #[cfg(feature = "usb")]
+    #[must_use]
+    pub fn with_usb_redirection(mut self, usb: Option<ironrdp_rdpeusb_native::UsbRedirectionConfig>) -> Self {
+        self.channels.usb = usb;
         self
     }
 
@@ -1638,11 +1980,13 @@ impl ConfigBuilder {
         #[cfg(not(all(windows, feature = "vmconnect")))]
         let uses_current_vmconnect_credentials = false;
         #[cfg(feature = "gateway")]
-        let gateway_uses_server_credentials = matches!(self.transport, TransportKind::Gateway { .. })
-            && matches!(
-                self.properties.gateway_credentials_source(),
-                Ok(Some(ironrdp_cfg::GatewayCredentialsSource::UseServerCredentials))
-            );
+        let gateway_uses_server_credentials = matches!(
+            self.transport,
+            TransportKind::Gateway { .. } | TransportKind::GatewayRpch { .. }
+        ) && matches!(
+            self.properties.gateway_credentials_source(),
+            Ok(Some(ironrdp_cfg::GatewayCredentialsSource::UseServerCredentials))
+        );
         #[cfg(not(feature = "gateway"))]
         let gateway_uses_server_credentials = false;
         if self.destination.is_none() {
@@ -1661,7 +2005,11 @@ impl ConfigBuilder {
             missing.push(MissingField::Password);
         }
         #[cfg(feature = "gateway")]
-        if matches!(self.transport, TransportKind::Gateway { .. }) && !gateway_uses_server_credentials {
+        if matches!(
+            self.transport,
+            TransportKind::Gateway { .. } | TransportKind::GatewayRpch { .. }
+        ) && !gateway_uses_server_credentials
+        {
             if self.gateway_username.is_none() {
                 missing.push(MissingField::GatewayUsername);
             }
@@ -1700,6 +2048,20 @@ impl ConfigBuilder {
         use ironrdp_pdu::rdp::capability_sets::client_codecs_capabilities;
         use ironrdp_pdu::rdp::client_info::TimezoneInfo;
 
+        if let Some(scale) = self.device_scale_factor {
+            anyhow::ensure!(
+                matches!(scale, 100 | 140 | 180),
+                "invalid device scale factor: valid values are 100, 140 and 180"
+            );
+        }
+        anyhow::ensure!(
+            (1..=256).contains(&self.channels.max_touch_contacts),
+            "invalid maximum touch contacts: valid values are 1 through 256"
+        );
+        if let Some(timeout) = self.tcp_connect_attempt_timeout {
+            anyhow::ensure!(!timeout.is_zero(), "the TCP connect attempt timeout must not be zero");
+        }
+
         if let Some(load_balance_info) = &self.load_balance_info {
             anyhow::ensure!(
                 load_balance_info.len() <= ironrdp_pdu::nego::MAX_ROUTING_TOKEN_LENGTH
@@ -1713,7 +2075,10 @@ impl ConfigBuilder {
         }
 
         #[cfg(feature = "gateway")]
-        if matches!(self.transport, TransportKind::Gateway { .. }) {
+        if matches!(
+            self.transport,
+            TransportKind::Gateway { .. } | TransportKind::GatewayRpch { .. }
+        ) {
             use ironrdp_cfg::GatewayCredentialsSource;
 
             match self
@@ -1867,6 +2232,16 @@ impl ConfigBuilder {
                 password: self.gateway_password.unwrap(),
                 prefer_direct,
             }),
+            #[cfg(feature = "gateway")]
+            TransportKind::GatewayRpch {
+                endpoint,
+                prefer_direct,
+            } => Transport::GatewayRpch(GatewayConfig {
+                endpoint,
+                username: self.gateway_username.unwrap(),
+                password: self.gateway_password.unwrap(),
+                prefer_direct,
+            }),
             TransportKind::RDCleanPath { url } => Transport::RDCleanPath(RDCleanPathConfig {
                 url,
                 auth_token: self.rdcleanpath_token.unwrap(),
@@ -1971,6 +2346,11 @@ impl ConfigBuilder {
             },
             monitor_layout: self.monitor_layout,
             desktop_scale_factor: self.desktop_scale_factor.unwrap_or(0),
+            desktop_physical_size: self.desktop_physical_size,
+            desktop_orientation: self.desktop_orientation,
+            device_scale_factor: self.device_scale_factor,
+            monitor_extended_layout: self.monitor_extended_layout,
+            relative_mouse_input: self.relative_mouse_input,
             bitmap: Some(bitmap),
             client_build: self.client_build.unwrap_or_default(),
             client_name,
@@ -1987,7 +2367,9 @@ impl ConfigBuilder {
             request_data: None,
             pointer_software_rendering: self.pointer_software_rendering.unwrap_or(false),
             multitransport_flags: None,
-            support_dyn_vc_gfx_protocol: self.graphics_pipeline,
+            support_dyn_vc_gfx_protocol: self
+                .graphics_pipeline
+                .unwrap_or_else(|| self.channels.h264_decoder.is_some()),
             compression_type,
             performance_flags: self.performance_flags.unwrap_or_default(),
             timezone_info: TimezoneInfo::default(),
@@ -2036,12 +2418,16 @@ impl ConfigBuilder {
             input_send_interval: self.input_send_interval,
             input_keepalive_interval: self.input_keepalive_interval,
             fake_events_interval: self.fake_events_interval,
+            tcp_connect_attempt_timeout: self.tcp_connect_attempt_timeout,
             channels: self.channels,
             administrative_session: self.administrative_session,
             load_balance_info: self.load_balance_info,
+            use_redirection_server_name: self.use_redirection_server_name,
+            redirection: None,
             #[cfg(any(feature = "sound", feature = "rdpdr"))]
             audio_quality_mode: self.audio_quality_mode.unwrap_or_default(),
             rail_client_status_flags: self.rail_client_status_flags,
+            rail_system_parameters: self.rail_system_parameters,
             rail_initial_execute,
             #[cfg(feature = "dvc-pipe-proxy")]
             dvc_pipe_proxies: self.dvc_pipe_proxies,
@@ -2109,6 +2495,9 @@ impl ConfigBuilder {
         if let Some(administrative_session) = ps.get::<bool>("administrative session") {
             self.administrative_session = administrative_session;
         }
+        if let Some(use_redirection_server_name) = ps.get::<bool>("use redirection server name") {
+            self.use_redirection_server_name = use_redirection_server_name;
+        }
         if let Some(load_balance_info) = ps.get::<&str>("loadbalanceinfo") {
             let normalized = load_balance_info.strip_suffix("\r\n").unwrap_or(load_balance_info);
             self.load_balance_info = if normalized.is_empty() {
@@ -2119,6 +2508,24 @@ impl ConfigBuilder {
         }
         if let Some(scale) = ps.desktop_scale_factor().ok().flatten() {
             self.desktop_scale_factor = Some(scale);
+        }
+        if let Some(scale) = ps.get::<i64>("devicescalefactor") {
+            self.device_scale_factor = Some(match scale {
+                100 => 100,
+                140 => 140,
+                180 => 180,
+                _ => anyhow::bail!("invalid 'devicescalefactor': valid values are 100, 140 and 180"),
+            });
+        }
+        if let Some(connection_type) = ps.get::<i64>("connection type") {
+            use ironrdp_pdu::gcc::ConnectionType;
+
+            self.connection_type = Some(
+                u8::try_from(connection_type)
+                    .ok()
+                    .and_then(ConnectionType::from_specified)
+                    .ok_or_else(|| anyhow::anyhow!("invalid 'connection type': valid values are 1 through 7"))?,
+            );
         }
         if let Some(width) = ps.desktop_width().ok().flatten() {
             self.desktop_width = Some(width);
@@ -2172,6 +2579,15 @@ impl ConfigBuilder {
         if let Some(enabled) = ps.compression() {
             self.compression_enabled = Some(enabled);
         }
+        // IronRDP renders 16 or 32 bits per pixel: `session bpp` selects the closest of the two,
+        // and the IronRDP-specific color depth, when present, takes precedence.
+        if let Some(bpp) = ps.get::<i64>("session bpp") {
+            self.color_depth = Some(match bpp {
+                8 | 15 | 16 => 16,
+                24 | 32 => 32,
+                _ => anyhow::bail!("invalid 'session bpp': valid values are 8, 15, 16, 24 and 32"),
+            });
+        }
         if let Some(depth) = ps.color_depth() {
             self.color_depth = Some(depth);
         }
@@ -2210,6 +2626,40 @@ impl ConfigBuilder {
             Ok(Some(AudioCaptureMode::CaptureFromClient)) => self.enable_audio_capture = Some(true),
             Ok(Some(AudioCaptureMode::Disabled)) => self.enable_audio_capture = Some(false),
             _ => {}
+        }
+        #[cfg(feature = "sound")]
+        {
+            if let Some(device) = ps.get::<&str>(crate::audio::OUTPUT_DEVICE_PROPERTY) {
+                self.channels.audio.output_device = Some(device.to_owned());
+            }
+            if let Some(device) = ps.get::<&str>(crate::audio::INPUT_DEVICE_PROPERTY) {
+                self.channels.audio.input_device = Some(device.to_owned());
+            }
+            if let Some(latency) = ps.get::<i64>(crate::audio::LATENCY_PROPERTY) {
+                let latency = u64::try_from(latency)
+                    .map_err(|_| anyhow::anyhow!("invalid '{}': {latency}", crate::audio::LATENCY_PROPERTY))?;
+                self.channels.audio.latency = Some(Duration::from_millis(latency));
+            }
+        }
+        if let Some(enabled) = ps.get::<i64>("ironrdp_egfx") {
+            self.graphics_pipeline = Some(enabled != 0);
+        }
+        // Off unless asked for, unlike mstsc. `1` asks for the per-user cache mstsc also keeps, at
+        // the default location unless a path was already chosen; `0` turns it off.
+        match ps.get::<i64>("bitmapcachepersistenable") {
+            Some(0) => self.channels.egfx_persistent_cache = None,
+            Some(_) if self.channels.egfx_persistent_cache.is_none() => {
+                self.channels.egfx_persistent_cache = crate::egfx_cache::default_cache_path();
+            }
+            _ => {}
+        }
+        #[cfg(feature = "video")]
+        if ps.get::<i64>("videoplaybackmode") == Some(0) {
+            self.channels.video.enabled = false;
+        }
+        #[cfg(feature = "camera")]
+        if let Some(cameras) = ps.get::<&str>("camerastoredirect") {
+            self.channels.cameras.apply_rdp_value(cameras);
         }
         #[cfg(any(feature = "sound", feature = "rdpdr"))]
         if let Some(audio_quality_mode) = ps.get::<i64>("audioqualitymode") {
@@ -2257,10 +2707,7 @@ impl ConfigBuilder {
                 if let Some(prefer_direct) = select_gateway_transport {
                     let endpoint = gateway_hostname.context("missing Gateway hostname")?;
 
-                    self.transport = TransportKind::Gateway {
-                        endpoint: endpoint.to_owned(),
-                        prefer_direct,
-                    };
+                    self.transport = gateway_transport_kind(ps, endpoint, prefer_direct)?;
 
                     if let Some(user) = ps.gateway_username() {
                         self.gateway_username = Some(user.to_owned());
@@ -2298,10 +2745,7 @@ impl ConfigBuilder {
                 if let Some(prefer_direct) = select_gateway_transport {
                     let endpoint = gateway_hostname.context("missing Gateway hostname")?;
 
-                    self.transport = TransportKind::Gateway {
-                        endpoint: endpoint.to_owned(),
-                        prefer_direct,
-                    };
+                    self.transport = gateway_transport_kind(ps, endpoint, prefer_direct)?;
 
                     if let Some(user) = ps.gateway_username() {
                         self.gateway_username = Some(user.to_owned());
@@ -2332,14 +2776,34 @@ impl ConfigBuilder {
             }
             let _ = redirect;
         }
+        #[cfg(feature = "location")]
+        if let Some(redirect) = ps.get::<bool>("redirectlocation") {
+            self.channels.location = redirect;
+        }
 
         #[cfg(feature = "rdpdr")]
         if let Some(enabled) = ps.enable_rdpdr() {
             self.channels.rdpdr.enabled = enabled;
         }
+        #[cfg(feature = "rdpdr")]
+        if let Some(drives) = ps.drive_redirection() {
+            self.channels.rdpdr.drives = drives;
+        }
+        #[cfg(feature = "smartcard")]
+        if let Some(enabled) = ps.get::<bool>("redirectsmartcards") {
+            self.channels.rdpdr.smartcard = enabled;
+        }
         #[cfg(feature = "smartcard")]
         if let Some(enabled) = ps.enable_smartcard() {
             self.channels.rdpdr.smartcard = enabled;
+        }
+        #[cfg(feature = "rdpdr")]
+        if let Some(enabled) = ps.redirect_com_ports() {
+            self.channels.rdpdr.ports = enabled;
+        }
+        #[cfg(feature = "rdpdr")]
+        if let Some(enabled) = ps.redirect_printers() {
+            self.channels.rdpdr.printers = enabled;
         }
         #[cfg(feature = "qoi")]
         if let Some(enabled) = ps.enable_qoi() {
@@ -2348,6 +2812,13 @@ impl ConfigBuilder {
         #[cfg(feature = "qoiz")]
         if let Some(enabled) = ps.enable_qoiz() {
             self.channels.qoiz = enabled;
+        }
+
+        #[cfg(feature = "usb")]
+        if let Some(devices) = ps.usb_devices_to_redirect() {
+            let usb = ironrdp_rdpeusb_native::UsbRedirectionConfig::parse_rdp(devices)
+                .context("invalid usbdevicestoredirect property")?;
+            self.channels.usb = usb.is_enabled().then_some(usb);
         }
 
         #[cfg(feature = "dvc-pipe-proxy")]
@@ -2399,6 +2870,29 @@ fn level_from_compression_type(ty: ironrdp_pdu::rdp::client_info::CompressionTyp
         CompressionType::K64 => 1,
         CompressionType::Rdp6 => 2,
         CompressionType::Rdp61 => 3,
+    }
+}
+
+/// Selects the gateway transport for a configured gateway endpoint.
+///
+/// Standard gateway properties keep selecting HTTP/WebSocket.
+/// Authenticated RPCH requires the IronRDP-specific `ironrdp_gatewayrpch:i:1` opt-in.
+#[cfg(feature = "gateway")]
+fn gateway_transport_kind(ps: &PropertySet, endpoint: &str, prefer_direct: bool) -> anyhow::Result<TransportKind> {
+    if ps.get::<&str>("ironrdp_gatewayrpch").is_some() {
+        anyhow::bail!("invalid 'ironrdp_gatewayrpch': expected integer 0 or 1");
+    }
+    let endpoint = endpoint.to_owned();
+    match ps.get::<i64>("ironrdp_gatewayrpch") {
+        None | Some(0) => Ok(TransportKind::Gateway {
+            endpoint,
+            prefer_direct,
+        }),
+        Some(1) => Ok(TransportKind::GatewayRpch {
+            endpoint,
+            prefer_direct,
+        }),
+        Some(value) => anyhow::bail!("invalid 'ironrdp_gatewayrpch': {value}"),
     }
 }
 
@@ -2493,6 +2987,33 @@ mod tests {
         assert!(complete_builder().with_property_set(&properties).is_err());
     }
 
+    #[test]
+    fn build_rejects_display_and_input_values_outside_their_protocol_ranges() {
+        assert!(complete_builder().with_device_scale_factor(140).build().is_ok());
+        assert!(complete_builder().with_device_scale_factor(125).build().is_err());
+        assert!(complete_builder().with_max_touch_contacts(256).build().is_ok());
+        assert!(complete_builder().with_max_touch_contacts(0).build().is_err());
+        assert!(complete_builder().with_max_touch_contacts(257).build().is_err());
+        assert!(
+            complete_builder()
+                .with_tcp_connect_attempt_timeout(Duration::ZERO)
+                .build()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn tcp_connect_attempt_timeout_is_unset_by_default() {
+        let config = complete_builder().build().expect("valid configuration");
+        assert_eq!(config.tcp_connect_attempt_timeout(), None);
+
+        let config = complete_builder()
+            .with_tcp_connect_attempt_timeout(Duration::from_secs(8))
+            .build()
+            .expect("valid configuration");
+        assert_eq!(config.tcp_connect_attempt_timeout(), Some(Duration::from_secs(8)));
+    }
+
     #[cfg(any(feature = "sound", feature = "rdpdr"))]
     #[test]
     fn property_set_rejects_out_of_range_audio_quality() {
@@ -2507,6 +3028,223 @@ mod tests {
             endpoint: "gateway.example:443".to_owned(),
             prefer_direct: false,
         })
+    }
+
+    #[cfg(feature = "gateway")]
+    #[test]
+    fn rpch_gateway_requires_explicit_selection_and_preserves_legacy_default() {
+        let legacy = gateway_builder()
+            .with_gateway_username("gateway-user")
+            .with_gateway_password("gateway-password")
+            .build()
+            .expect("valid legacy gateway configuration");
+        assert!(matches!(legacy.transport(), Transport::Gateway(_)));
+
+        let rpch = complete_builder()
+            .with_transport(TransportKind::GatewayRpch {
+                endpoint: "gateway.example:443".to_owned(),
+                prefer_direct: false,
+            })
+            .with_gateway_username("gateway-user")
+            .with_gateway_password("gateway-password")
+            .build()
+            .expect("valid explicit RPCH gateway configuration");
+        // oracle: regression #2202 (explicit RPCH selection must retain its exported opt-in).
+        assert_eq!(rpch.properties().get::<i64>("ironrdp_gatewayrpch"), Some(1));
+        let Transport::GatewayRpch(gateway) = rpch.transport() else {
+            panic!("explicit RPCH gateway transport expected");
+        };
+        assert_eq!(gateway.endpoint, "gateway.example:443");
+        assert_eq!(gateway.username, "gateway-user");
+        assert_eq!(gateway.password, "gateway-password");
+        assert!(!gateway.prefer_direct);
+    }
+
+    #[cfg(feature = "gateway")]
+    fn gateway_test_properties() -> ironrdp_propertyset::PropertySet {
+        let mut properties = ironrdp_propertyset::PropertySet::new();
+        properties.insert("gatewayhostname", "gateway.example:443");
+        properties.insert("gatewayusagemethod", 1i64);
+        properties
+    }
+
+    #[cfg(feature = "gateway")]
+    #[test]
+    fn rpch_gateway_absent_property_selects_http() {
+        // oracle: regression #2202: standard gateway properties preserve the HTTP/WebSocket default.
+        let properties = gateway_test_properties();
+        let legacy = complete_builder()
+            .with_property_set(&properties)
+            .expect("valid gateway properties");
+        assert!(matches!(legacy.transport, TransportKind::Gateway { .. }));
+    }
+
+    #[cfg(feature = "gateway")]
+    #[test]
+    fn rpch_gateway_zero_property_selects_http() {
+        // oracle: regression #2202: integer zero disables the RPCH opt-in.
+        let mut properties = gateway_test_properties();
+        properties.insert("ironrdp_gatewayrpch", 0i64);
+        let builder = complete_builder()
+            .with_property_set(&properties)
+            .expect("valid disabled RPCH property");
+        assert!(matches!(builder.transport, TransportKind::Gateway { .. }));
+    }
+
+    #[cfg(feature = "gateway")]
+    #[test]
+    fn rpch_gateway_one_property_selects_rpch() {
+        // oracle: regression #2202: integer one explicitly selects RPCH.
+        let mut properties = gateway_test_properties();
+        properties.insert("ironrdp_gatewayrpch", 1i64);
+        let rpch = complete_builder()
+            .with_property_set(&properties)
+            .expect("valid RPCH gateway properties");
+        assert!(matches!(
+            rpch.transport,
+            TransportKind::GatewayRpch { ref endpoint, prefer_direct: false } if endpoint == "gateway.example:443"
+        ));
+    }
+
+    #[cfg(feature = "gateway")]
+    #[test]
+    fn rpch_gateway_rejects_other_integer_properties() {
+        // oracle: regression #2202: only integer zero and one are valid opt-in values.
+        for value in [-1, 2, i64::MIN, i64::MAX] {
+            let mut properties = gateway_test_properties();
+            properties.insert("ironrdp_gatewayrpch", value);
+            assert!(
+                complete_builder().with_property_set(&properties).is_err(),
+                "invalid value: {value}"
+            );
+        }
+    }
+
+    #[cfg(feature = "gateway")]
+    #[test]
+    fn rpch_gateway_rejects_string_properties() {
+        // oracle: regression #2202: the opt-in property uses the RDP integer type, not a string.
+        for value in ["", "0", "1"] {
+            let mut properties = gateway_test_properties();
+            properties.insert("ironrdp_gatewayrpch", value);
+            assert!(
+                complete_builder().with_property_set(&properties).is_err(),
+                "invalid string: {value:?}"
+            );
+        }
+    }
+
+    // oracle: regression #2202 (exported direct settings must not retain the RPCH opt-in).
+    #[cfg(feature = "gateway")]
+    #[test]
+    fn direct_transport_clears_rpch_opt_in() {
+        let config = complete_builder()
+            .with_transport(TransportKind::GatewayRpch {
+                endpoint: "gateway.example:443".to_owned(),
+                prefer_direct: false,
+            })
+            .with_transport(TransportKind::Direct)
+            .build()
+            .expect("valid direct configuration");
+
+        assert!(matches!(config.transport(), Transport::Direct));
+        assert_eq!(config.properties().get::<i64>("ironrdp_gatewayrpch"), None);
+
+        let mut properties = config.properties().clone();
+        properties.set_gateway_hostname("new-gateway.example:443");
+        properties.set_gateway_usage_method(ironrdp_cfg::GatewayUsageMethod::UseAlways);
+        let reloaded = complete_builder()
+            .with_property_set(&properties)
+            .expect("valid merged gateway properties")
+            .with_gateway_username("gateway-user")
+            .with_gateway_password("gateway-password")
+            .build()
+            .expect("valid merged gateway configuration");
+        assert!(matches!(reloaded.transport(), Transport::Gateway(_)));
+    }
+
+    // oracle: regression #2202 (exported RDCleanPath settings must not retain the RPCH opt-in).
+    #[cfg(feature = "gateway")]
+    #[test]
+    fn rdcleanpath_transport_clears_rpch_opt_in() {
+        let config = complete_builder()
+            .with_transport(TransportKind::GatewayRpch {
+                endpoint: "gateway.example:443".to_owned(),
+                prefer_direct: false,
+            })
+            .with_transport(TransportKind::RDCleanPath {
+                url: "wss://proxy.example".parse().expect("valid RDCleanPath URL"),
+            })
+            .with_rdcleanpath_token("token")
+            .build()
+            .expect("valid RDCleanPath configuration");
+
+        assert!(matches!(config.transport(), Transport::RDCleanPath(_)));
+        assert_eq!(config.properties().get::<i64>("ironrdp_gatewayrpch"), None);
+    }
+
+    // oracle: regression #2202 (exported named-pipe settings must not retain the RPCH opt-in).
+    #[cfg(all(windows, feature = "gateway"))]
+    #[test]
+    fn named_pipe_transport_clears_rpch_opt_in() {
+        let config = complete_builder()
+            .with_transport(TransportKind::GatewayRpch {
+                endpoint: "gateway.example:443".to_owned(),
+                prefer_direct: false,
+            })
+            .with_transport(TransportKind::NamedPipe {
+                path: r"\\.\pipe\rdp".to_owned(),
+            })
+            .build()
+            .expect("valid named-pipe configuration");
+
+        assert!(matches!(config.transport(), Transport::NamedPipe { .. }));
+        assert_eq!(config.properties().get::<i64>("ironrdp_gatewayrpch"), None);
+    }
+
+    // oracle: regression #2202 (exported HTTP gateway settings must not retain the RPCH opt-in).
+    #[cfg(feature = "gateway")]
+    #[test]
+    fn http_gateway_transport_clears_rpch_opt_in() {
+        let config = complete_builder()
+            .with_transport(TransportKind::GatewayRpch {
+                endpoint: "gateway.example:443".to_owned(),
+                prefer_direct: false,
+            })
+            .with_transport(TransportKind::Gateway {
+                endpoint: "gateway.example:443".to_owned(),
+                prefer_direct: false,
+            })
+            .with_gateway_username("gateway-user")
+            .with_gateway_password("gateway-password")
+            .build()
+            .expect("valid HTTP gateway configuration");
+
+        assert!(matches!(config.transport(), Transport::Gateway(_)));
+        assert_eq!(config.properties().get::<i64>("ironrdp_gatewayrpch"), None);
+    }
+
+    #[cfg(feature = "gateway")]
+    #[test]
+    fn rpch_gateway_resolves_server_credentials() {
+        let mut properties = ironrdp_propertyset::PropertySet::new();
+        properties.set_gateway_credentials_source(ironrdp_cfg::GatewayCredentialsSource::UseServerCredentials);
+        let config = complete_builder()
+            .with_transport(TransportKind::GatewayRpch {
+                endpoint: "gateway.example:443".to_owned(),
+                prefer_direct: false,
+            })
+            .with_property_set(&properties)
+            .expect("valid gateway credentials source")
+            .with_domain("CONTOSO")
+            .build()
+            .expect("valid RPCH server credential configuration");
+
+        let Transport::GatewayRpch(gateway) = config.transport() else {
+            panic!("explicit RPCH gateway transport expected");
+        };
+        assert_eq!(gateway.username, "CONTOSO\\user");
+        assert_eq!(gateway.password, "password");
     }
 
     #[cfg(feature = "gateway")]

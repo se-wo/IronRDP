@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use ironrdp_core::{Encode, WriteBuf, decode, encode_vec};
 use ironrdp_pdu::rdp::capability_sets::WindowSupportLevel;
+use ironrdp_pdu::rdp::server_redirection::ServerRedirectionPdu;
 use ironrdp_pdu::rdp::session_info::ServerAutoReconnect;
 use ironrdp_pdu::x224::X224;
 use ironrdp_pdu::{PduHint, gcc, mcs, nego, rdp};
@@ -195,6 +196,38 @@ impl ConnectionResult {
     }
 }
 
+/// How a client connection sequence ended.
+#[derive(Debug)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "the outcome is produced once per connection and moved straight to its consumer"
+)]
+pub enum ConnectionOutcome {
+    /// The connection is established and the session can start.
+    Connected(ConnectionResult),
+    /// The server sent a Server Redirection PDU ([MS-RDPBCGR] 3.2.5.13.1).
+    ///
+    /// The client must close this connection and connect to the target the PDU describes, sending its
+    /// load-balancing information as the routing token and its session ID in the Client Cluster Data.
+    ///
+    /// [MS-RDPBCGR]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr/
+    Redirected(Box<ServerRedirectionPdu>),
+}
+
+impl ConnectionOutcome {
+    /// Returns the connection result, or an error for a client that does not follow redirections.
+    pub fn into_connected(self) -> ConnectorResult<ConnectionResult> {
+        match self {
+            Self::Connected(result) => Ok(result),
+            Self::Redirected(redirection) => Err(reason_err!(
+                "Connect",
+                "server requested a redirection to session {}, which this client does not follow",
+                redirection.session_id
+            )),
+        }
+    }
+}
+
 #[derive(Default, Debug)]
 #[non_exhaustive]
 pub enum ClientConnectorState {
@@ -298,6 +331,26 @@ pub enum ClientConnectorState {
     Connected {
         result: ConnectionResult,
     },
+    /// The server sent a Server Redirection PDU instead of completing the connection.
+    ///
+    /// See [`ConnectionOutcome::Redirected`].
+    Redirected {
+        redirection: Box<ServerRedirectionPdu>,
+    },
+}
+
+impl ClientConnectorState {
+    /// Takes the outcome out of a terminal state, leaving [`Self::Consumed`].
+    pub fn take_outcome(&mut self) -> Option<ConnectionOutcome> {
+        match mem::take(self) {
+            Self::Connected { result } => Some(ConnectionOutcome::Connected(result)),
+            Self::Redirected { redirection } => Some(ConnectionOutcome::Redirected(redirection)),
+            other => {
+                *self = other;
+                None
+            }
+        }
+    }
 }
 
 impl State for ClientConnectorState {
@@ -323,11 +376,12 @@ impl State for ClientConnectorState {
                 connection_activation, ..
             } => connection_activation.state().name(),
             Self::Connected { .. } => "Connected",
+            Self::Redirected { .. } => "Redirected",
         }
     }
 
     fn is_terminal(&self) -> bool {
-        matches!(self, Self::Connected { .. })
+        matches!(self, Self::Connected { .. } | Self::Redirected { .. })
     }
 
     fn as_any(&self) -> &dyn core::any::Any {
@@ -362,6 +416,8 @@ pub struct ClientConnector {
     ///
     /// Set via [`ClientConnector::with_auto_reconnect_cookie`].
     pub auto_reconnect_cookie: Option<ServerAutoReconnect>,
+    /// Password cookie from a Server Redirection PDU, sent in the Client Info PDU.
+    redirection_password_cookie: Option<Vec<u8>>,
     /// Start of the in-flight connect-time bandwidth measurement window.
     ///
     /// Set when the server's Bandwidth Measure Start arrives, and only when the
@@ -389,6 +445,7 @@ impl ClientConnector {
             response_flags: nego::ResponseFlags::empty(),
             server_multitransport_flags: None,
             auto_reconnect_cookie: None,
+            redirection_password_cookie: None,
             connect_time_bw_started_at: None,
             connect_time_bw_bytes: 0,
         }
@@ -417,6 +474,20 @@ impl ClientConnector {
     #[must_use]
     pub fn with_cluster_data(mut self, cluster_data: gcc::ClientClusterData) -> Self {
         self.cluster_data = Some(cluster_data);
+        self
+    }
+
+    /// Send the password cookie of a Server Redirection PDU in the Client Info PDU.
+    ///
+    /// [MS-RDPBCGR] 2.2.13.1 asks the client to pass the `Password` field of the Server Redirection Packet to the
+    /// target server.
+    /// The cookie replaces the configured password in the Client Info PDU only; the credentials still authenticate
+    /// CredSSP.
+    ///
+    /// [MS-RDPBCGR]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr/
+    #[must_use]
+    pub fn with_redirection_password_cookie(mut self, cookie: Vec<u8>) -> Self {
+        self.redirection_password_cookie = Some(cookie);
         self
     }
 
@@ -1070,7 +1141,7 @@ impl Sequence for ClientConnector {
             ClientConnectorState::ConnectionFinalization {
                 connection_activation, ..
             } => connection_activation.next_pdu_hint(),
-            ClientConnectorState::Connected { .. } => None,
+            ClientConnectorState::Connected { .. } | ClientConnectorState::Redirected { .. } => None,
         }
     }
 
@@ -1300,8 +1371,12 @@ impl Sequence for ClientConnector {
             } => {
                 debug!("Secure Settings Exchange");
 
-                let client_info =
-                    create_client_info_pdu(&self.config, &self.client_addr, self.auto_reconnect_cookie.as_ref());
+                let client_info = create_client_info_pdu(
+                    &self.config,
+                    &self.client_addr,
+                    self.auto_reconnect_cookie.as_ref(),
+                    self.redirection_password_cookie.as_deref(),
+                );
 
                 debug!(message = ?client_info, "Send");
 
@@ -1506,6 +1581,9 @@ impl Sequence for ClientConnector {
                             ConnectionActivationState::ConnectionFinalization { .. } => {
                                 ClientConnectorState::ConnectionFinalization { connection_activation }
                             }
+                            ConnectionActivationState::Redirected { redirection } => {
+                                ClientConnectorState::Redirected { redirection }
+                            }
                             _ => ClientConnectorState::CapabilitiesExchange { connection_activation },
                         },
                     )
@@ -1549,6 +1627,9 @@ impl Sequence for ClientConnector {
                         written,
                         ClientConnectorState::CapabilitiesExchange { connection_activation },
                     ),
+                    ConnectionActivationState::Redirected { redirection } => {
+                        (written, ClientConnectorState::Redirected { redirection })
+                    }
                     _ => return Err(general_err!("invalid state (this is a bug)")),
                 }
             }
@@ -1565,6 +1646,9 @@ impl Sequence for ClientConnector {
                     ClientConnectorState::ConnectionFinalization { connection_activation }
                 } else {
                     match connection_activation.connection_activation_state() {
+                        ConnectionActivationState::Redirected { redirection } => {
+                            ClientConnectorState::Redirected { redirection }
+                        }
                         ConnectionActivationState::Finalized {
                             desktop_size,
                             share_id,
@@ -1616,6 +1700,7 @@ impl Sequence for ClientConnector {
             //== Connected ==//
             // The client connector job is done.
             ClientConnectorState::Connected { .. } => return Err(general_err!("already connected")),
+            ClientConnectorState::Redirected { .. } => return Err(general_err!("already redirected")),
         };
 
         self.state = next_state;
@@ -1687,7 +1772,13 @@ fn create_gcc_blocks<'a>(
 
     Ok(ClientGccBlocks {
         core: ClientCoreData {
-            version: RdpVersion::V5_PLUS,
+            // Servers ignore the relative mouse capabilities below RDP 10.12 ([MS-RDPBCGR] 2.2.1.3.2,
+            // 2.2.7.1.6), so only a client that sends relative input announces that version.
+            version: if config.relative_mouse_input {
+                RdpVersion::V10_12
+            } else {
+                RdpVersion::V5_PLUS
+            },
             desktop_width: config.desktop_size.width,
             desktop_height: config.desktop_size.height,
             color_depth: ColorDepth::Bpp8, // ignored because we use the optional core data below
@@ -1724,22 +1815,30 @@ fn create_gcc_blocks<'a>(
                     if config.support_dyn_vc_gfx_protocol {
                         early_capability_flags |= ClientEarlyCapabilityFlags::SUPPORT_DYN_VC_GFX_PROTOCOL;
                     }
+                    if config.relative_mouse_input {
+                        early_capability_flags |= ClientEarlyCapabilityFlags::RELATIVE_MOUSE_INPUT;
+                    }
 
                     Some(early_capability_flags)
                 },
                 dig_product_id: Some(config.dig_product_id.clone()),
                 connection_type: Some(config.connection_type),
                 server_selected_protocol: Some(selected_protocol),
-                desktop_physical_width: Some(0),  // 0 per FreeRDP
-                desktop_physical_height: Some(0), // 0 per FreeRDP
-                desktop_orientation: if config.desktop_size.width > config.desktop_size.height {
-                    Some(MonitorOrientation::Landscape.as_u16())
-                } else {
-                    Some(MonitorOrientation::Portrait.as_u16())
-                },
+                desktop_physical_width: Some(config.desktop_physical_size.map_or(0, |(width, _)| width)),
+                desktop_physical_height: Some(config.desktop_physical_size.map_or(0, |(_, height)| height)),
+                desktop_orientation: Some(
+                    config
+                        .desktop_orientation
+                        .unwrap_or(if config.desktop_size.width > config.desktop_size.height {
+                            MonitorOrientation::Landscape
+                        } else {
+                            MonitorOrientation::Portrait
+                        })
+                        .as_u16(),
+                ),
                 desktop_scale_factor: Some(config.desktop_scale_factor),
                 device_scale_factor: if config.desktop_scale_factor >= 100 && config.desktop_scale_factor <= 500 {
-                    Some(100)
+                    Some(config.device_scale_factor.unwrap_or(100))
                 } else {
                     Some(0)
                 },
@@ -1769,19 +1868,39 @@ fn create_gcc_blocks<'a>(
                     .map(|flags| gcc::MultiTransportChannelData { flags })
             })
             .flatten(),
-        monitor_extended: None,
+        // Client Monitor Extended Data describes the monitors of Client Monitor Data, so it is
+        // only sent alongside it, with the same monitor count ([MS-RDPBCGR] 2.2.1.3.10).
+        monitor_extended: extended_client_data_supported
+            .then(|| monitor_extended_layout(config))
+            .flatten(),
     })
+}
+
+/// Returns the configured Client Monitor Extended Data when it describes every monitor of Client Monitor Data.
+fn monitor_extended_layout(config: &Config) -> Option<gcc::ClientMonitorExtendedData> {
+    let monitors = config.monitor_layout.as_ref()?.monitors.len();
+    let extended = config.monitor_extended_layout.as_ref()?;
+    if extended.extended_monitors_info.len() != monitors {
+        warn!(
+            monitors,
+            extended_monitors = extended.extended_monitors_info.len(),
+            "Omitting Client Monitor Extended Data whose monitor count differs from Client Monitor Data"
+        );
+        return None;
+    }
+    Some(extended.clone())
 }
 
 fn create_client_info_pdu(
     config: &Config,
     client_addr: &SocketAddr,
     auto_reconnect_cookie: Option<&ServerAutoReconnect>,
+    password_cookie: Option<&[u8]>,
 ) -> rdp::ClientInfoPdu {
     use ironrdp_pdu::rdp::ClientInfoPdu;
     use ironrdp_pdu::rdp::client_info::{
         AddressFamily, ClientAutoReconnect, ClientInfo, ClientInfoFlags, CompressionType, Credentials,
-        ExtendedClientInfo, ExtendedClientOptionalInfo,
+        ExtendedClientInfo, ExtendedClientOptionalInfo, PasswordCookie,
     };
     use ironrdp_pdu::rdp::headers::{BasicSecurityHeader, BasicSecurityHeaderFlags};
 
@@ -1842,6 +1961,10 @@ fn create_client_info_pdu(
             password: config.credentials.secret().to_owned(),
             domain: config.domain.clone(),
         },
+        // A smart card logon sends its PIN, never a redirection cookie.
+        password_cookie: password_cookie
+            .filter(|_| !flags.contains(ClientInfoFlags::PASSWORD_IS_SC_PIN))
+            .map(|cookie| PasswordCookie(cookie.to_vec())),
         code_page: 0, // ignored if the keyboardLayout field of the Client Core Data is set to zero
         flags,
         compression_type,
@@ -1897,6 +2020,11 @@ mod tests {
             },
             monitor_layout: None,
             desktop_scale_factor: 0,
+            desktop_physical_size: None,
+            desktop_orientation: None,
+            device_scale_factor: None,
+            monitor_extended_layout: None,
+            relative_mouse_input: false,
             enable_tls: true,
             enable_credssp: false,
             enable_standard_rdp_security: false,
@@ -1936,7 +2064,7 @@ mod tests {
             support_dyn_vc_gfx_protocol: false,
         };
 
-        let client_info = create_client_info_pdu(&config, &"127.0.0.1:3389".parse().unwrap(), None).client_info;
+        let client_info = create_client_info_pdu(&config, &"127.0.0.1:3389".parse().unwrap(), None, None).client_info;
 
         assert!(client_info.flags.contains(ClientInfoFlags::RAIL));
         assert!(client_info.alternate_shell.is_empty());
@@ -1953,6 +2081,11 @@ mod tests {
             },
             monitor_layout: None,
             desktop_scale_factor: 0,
+            desktop_physical_size: None,
+            desktop_orientation: None,
+            device_scale_factor: None,
+            monitor_extended_layout: None,
+            relative_mouse_input: false,
             enable_tls: true,
             enable_credssp: false,
             enable_standard_rdp_security: false,
@@ -1992,12 +2125,12 @@ mod tests {
             support_dyn_vc_gfx_protocol: false,
         };
 
-        let client_info = create_client_info_pdu(&config, &"127.0.0.1:3389".parse().unwrap(), None).client_info;
+        let client_info = create_client_info_pdu(&config, &"127.0.0.1:3389".parse().unwrap(), None, None).client_info;
         assert!(client_info.flags.contains(ClientInfoFlags::AUDIO_CAPTURE));
         assert!(!client_info.flags.contains(ClientInfoFlags::NO_AUDIO_PLAYBACK));
 
         config.enable_audio_capture = false;
-        let client_info = create_client_info_pdu(&config, &"127.0.0.1:3389".parse().unwrap(), None).client_info;
+        let client_info = create_client_info_pdu(&config, &"127.0.0.1:3389".parse().unwrap(), None, None).client_info;
         assert!(!client_info.flags.contains(ClientInfoFlags::AUDIO_CAPTURE));
     }
 
@@ -2018,6 +2151,11 @@ mod tests {
                 }],
             }),
             desktop_scale_factor: 0,
+            desktop_physical_size: None,
+            desktop_orientation: None,
+            device_scale_factor: None,
+            monitor_extended_layout: None,
+            relative_mouse_input: false,
             enable_tls: true,
             enable_credssp: false,
             enable_standard_rdp_security: false,
@@ -2067,6 +2205,7 @@ mod tests {
         .expect("valid GCC Client Monitor Data");
 
         assert_eq!(blocks.monitor, config.monitor_layout);
+        assert!(blocks.monitor_extended.is_none());
         assert!(
             blocks
                 .core
@@ -2076,6 +2215,43 @@ mod tests {
                 .contains(gcc::ClientEarlyCapabilityFlags::SUPPORT_MONITOR_LAYOUT_PDU)
         );
 
+        let monitor_extended = gcc::ClientMonitorExtendedData {
+            extended_monitors_info: vec![gcc::ExtendedMonitorInfo {
+                physical_width: 0,
+                physical_height: 0,
+                orientation: gcc::MonitorOrientation::Portrait,
+                desktop_scale_factor: 150,
+                device_scale_factor: 140,
+            }],
+        };
+        config.monitor_extended_layout = Some(monitor_extended.clone());
+        let blocks = create_gcc_blocks(
+            &config,
+            None,
+            nego::SecurityProtocol::empty(),
+            true,
+            core::iter::empty(),
+        )
+        .expect("valid GCC Client Monitor Extended Data");
+        assert_eq!(blocks.monitor_extended, Some(monitor_extended.clone()));
+
+        // A count that differs from Client Monitor Data would be a nonconformant block.
+        let mut mismatched = monitor_extended;
+        mismatched
+            .extended_monitors_info
+            .push(mismatched.extended_monitors_info[0].clone());
+        config.monitor_extended_layout = Some(mismatched);
+        let blocks = create_gcc_blocks(
+            &config,
+            None,
+            nego::SecurityProtocol::empty(),
+            true,
+            core::iter::empty(),
+        )
+        .expect("valid GCC Client Monitor Data");
+        assert!(blocks.monitor_extended.is_none());
+
+        // Extended data describes the monitors of Client Monitor Data, so it is not sent alone.
         config.monitor_layout = None;
         let blocks = create_gcc_blocks(
             &config,
@@ -2087,6 +2263,7 @@ mod tests {
         .expect("valid GCC Client Monitor Data");
 
         assert!(blocks.monitor.is_none());
+        assert!(blocks.monitor_extended.is_none());
         assert!(
             blocks
                 .core

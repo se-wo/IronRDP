@@ -67,6 +67,7 @@ struct SessionBuilderInner {
     server_domain: Option<String>,
     password: Option<String>,
     proxy_address: Option<String>,
+    websocket_protocols: Result<Option<js_sys::Array>, &'static str>,
     auth_token: Option<String>,
     pcb: Option<String>,
     vmconnect: Option<String>,
@@ -111,6 +112,7 @@ impl Default for SessionBuilderInner {
             server_domain: None,
             password: None,
             proxy_address: None,
+            websocket_protocols: Ok(None),
             auth_token: None,
             pcb: None,
             vmconnect: None,
@@ -189,6 +191,34 @@ impl iron_remote_desktop::SessionBuilder for SessionBuilder {
     /// Required
     fn proxy_address(&self, address: String) -> Self {
         self.0.borrow_mut().proxy_address = Some(address);
+        self.clone()
+    }
+
+    /// Optional
+    fn websocket_protocols(&self, protocols: js_sys::Array) -> Self {
+        // Copy validated values so later changes to the caller's array cannot change the configuration.
+        let protocols = if js_sys::Array::is_array(&protocols) {
+            protocols
+                .iter()
+                .try_fold(js_sys::Array::new(), |copy, protocol| {
+                    if !protocol.is_string() {
+                        return Err("websocket protocols must be strings");
+                    }
+
+                    copy.push(&protocol);
+                    Ok(copy)
+                })
+                .map(|protocols| (protocols.length() != 0).then_some(protocols))
+        } else {
+            Err("websocket protocols must be an array")
+        };
+
+        if let Err(error) = protocols {
+            warn!(%error, "Invalid WebSocket protocols");
+        }
+
+        self.0.borrow_mut().websocket_protocols = protocols;
+
         self.clone()
     }
 
@@ -350,6 +380,7 @@ impl iron_remote_desktop::SessionBuilder for SessionBuilder {
             server_domain,
             password,
             proxy_address,
+            websocket_protocols,
             auth_token,
             pcb,
             vmconnect,
@@ -381,6 +412,7 @@ impl iron_remote_desktop::SessionBuilder for SessionBuilder {
         {
             let inner = self.0.borrow();
 
+            websocket_protocols = inner.websocket_protocols.clone().map_err(anyhow::Error::msg)?;
             username = inner.username.clone().context("username missing")?;
             destination = inner.destination.clone().context("destination missing")?;
             server_domain = inner.server_domain.clone();
@@ -491,7 +523,14 @@ impl iron_remote_desktop::SessionBuilder for SessionBuilder {
         let printer_name = printer_name.unwrap_or_else(|| "IronRDP Virtual Printer".to_owned());
         let printer_driver_name = printer_driver_name.unwrap_or_else(default_printer_driver_name);
 
-        let ws = WebSocket::open(&proxy_address).context("couldn't open WebSocket")?;
+        let ws = if let Some(protocols) = websocket_protocols {
+            web_sys::WebSocket::new_with_str_sequence(&proxy_address, &protocols)
+                .map_err(|error| anyhow::anyhow!("{error:?}"))
+                .and_then(|socket| WebSocket::try_from(socket).map_err(anyhow::Error::from))
+        } else {
+            WebSocket::open(&proxy_address).map_err(anyhow::Error::from)
+        }
+        .context("couldn't open WebSocket")?;
 
         // NOTE: ideally, when the WebSocket can't be opened, the above call should fail with details on why is that
         // (e.g., the proxy hostname could not be resolved, proxy service is not running), but errors are neved
@@ -730,7 +769,7 @@ impl iron_remote_desktop::Session for Session {
                     let (action, payload) = frame.context("read frame")?;
                     trace!(?action, frame_length = payload.len(), "Frame received");
 
-                    active_stage.process(&mut image, action, &payload)?
+                    active_stage.process(&mut image, action, &payload, framed.last_read_at())?
                 }
                 input_events = input_events.next() => {
                     let event = input_events.context("read next input events")?;
@@ -1052,8 +1091,8 @@ impl iron_remote_desktop::Session for Session {
                             "Received remote monitor layout without multi-monitor support"
                         );
                     }
-                    ActiveStageOutput::WindowingOrders(_) => {
-                        // Windowing orders are not meaningful to the protocol-agnostic web component.
+                    ActiveStageOutput::WindowingOrders(_) | ActiveStageOutput::WindowSurfaceUpdates(_) => {
+                        // RemoteApp windows are not meaningful to the protocol-agnostic web component.
                     }
                     ActiveStageOutput::DeactivateAll => {
                         // Execute the Deactivation-Reactivation Sequence:
@@ -1120,14 +1159,23 @@ impl iron_remote_desktop::Session for Session {
                     ActiveStageOutput::AutoReconnectCookie(_) => {
                         debug!("Server Auto-Reconnect Cookie received (automatic reconnection not implemented)");
                     }
+                    ActiveStageOutput::LogonErrors(errors) => {
+                        debug!(?errors, "Server logon error notification");
+                    }
                     ActiveStageOutput::AutoReconnectFailed => {
                         return Err(anyhow::Error::msg("automatic reconnect rejected by server").into());
+                    }
+                    ActiveStageOutput::ServerRedirection(_) => {
+                        return Err(anyhow::Error::msg("server redirection is not supported by the web client").into());
                     }
                     ActiveStageOutput::SaveSessionInfo { logon_complete: true } => {
                         debug!("RDP login complete");
                     }
                     ActiveStageOutput::SaveSessionInfo { logon_complete: false } => {
                         debug!("RDP session info notification");
+                    }
+                    ActiveStageOutput::SessionId(session_id) => {
+                        debug!(session_id, "Remote session ID");
                     }
                     ActiveStageOutput::Terminate(reason) => break 'outer reason,
                 }
@@ -1537,6 +1585,11 @@ fn build_config(
         support_dyn_vc_gfx_protocol: false,
         performance_flags: PerformanceFlags::default(),
         desktop_scale_factor: 0,
+        desktop_physical_size: None,
+        desktop_orientation: None,
+        device_scale_factor: None,
+        monitor_extended_layout: None,
+        relative_mouse_input: false,
         hardware_id: None,
         license_cache: None,
         timezone_info: TimezoneInfo::default(),
@@ -1720,7 +1773,8 @@ async fn connect(
         server_public_key,
         kerberos_config,
     )
-    .await?;
+    .await?
+    .into_connected()?;
 
     let ws = framed.into_inner_no_leftover();
 

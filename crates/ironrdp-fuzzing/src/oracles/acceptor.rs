@@ -486,6 +486,7 @@ fn client_handshake(config: Config) -> Vec<ClientFrame> {
                 },
                 client_info: ClientInfo {
                     credentials: client_credentials(),
+                    password_cookie: None,
                     code_page: 0,
                     flags: ClientInfoFlags::MOUSE | ClientInfoFlags::UNICODE | ClientInfoFlags::LOGON_NOTIFY,
                     compression_type: CompressionType::K8,
