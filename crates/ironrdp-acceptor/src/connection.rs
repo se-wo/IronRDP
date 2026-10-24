@@ -193,6 +193,11 @@ pub struct AcceptorResult {
     /// per section 2.2.14, multitransport bootstrap, heartbeat) are sent on this
     /// channel. `None` when the client did not request it.
     pub message_channel_id: Option<u16>,
+    /// Whether this result comes from an acceptor rebuilt with [`Acceptor::new_deactivation_reactivation`].
+    ///
+    /// A Deactivation-Reactivation Sequence (MS-RDPBCGR 1.3.1.3) only re-runs the capability exchange and the
+    /// connection finalization, so such a result keeps the MCS channel IDs and the static channels of the connection it
+    /// reactivates.
     pub reactivation: bool,
     /// Keyboard layout identifier (KLID) announced by the client in its GCC
     /// Client Core Data (section 2.2.1.3.2, `keyboardLayout`).
@@ -279,6 +284,11 @@ pub struct AcceptorResult {
 }
 
 impl Acceptor {
+    /// Creates an acceptor for a new connection.
+    ///
+    /// The server advertises `desktop_size` and `capabilities` in its Demand Active.
+    /// When `creds` is set and the connection does not use CredSSP, the acceptor answers a Client Info PDU carrying any
+    /// other credentials with an access-denied error, so [`AcceptorResult::credentials`] can only hold `creds`.
     pub fn new(
         security: SecurityProtocol,
         desktop_size: DesktopSize,
@@ -503,6 +513,12 @@ impl Acceptor {
         true
     }
 
+    /// Rebuilds an accepted acceptor for a Deactivation-Reactivation Sequence (MS-RDPBCGR 1.3.1.3).
+    ///
+    /// The new acceptor re-runs only the capability exchange and the connection finalization.
+    /// Its Demand Active advertises `desktop_size`, it keeps the MCS channel IDs of `consumed`, and `static_channels`
+    /// are the channels taken from the accepted result.
+    /// Fails when `consumed` never completed the licensing exchange.
     pub fn new_deactivation_reactivation(
         mut consumed: Acceptor,
         static_channels: StaticChannelSet,
