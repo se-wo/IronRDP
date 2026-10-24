@@ -1,5 +1,6 @@
 //! Server-side connection sequence ([`Acceptor`]) state-machine oracle.
 
+use core::ops::RangeInclusive;
 use std::borrow::Cow;
 use std::sync::OnceLock;
 
@@ -8,9 +9,9 @@ use ironrdp_connector::Sequence as _;
 use ironrdp_core::{Encode, WriteBuf, decode, encode_vec, impl_as_any};
 use ironrdp_pdu::gcc::{
     ChannelDef, ChannelName, ChannelOptions, ClientCoreData, ClientCoreOptionalData, ClientEarlyCapabilityFlags,
-    ClientGccBlocks, ClientMessageChannelData, ClientNetworkData, ClientSecurityData, ColorDepth, EncryptionMethod,
-    HighColorDepth, KeyboardType, MonitorFlags, MultiTransportChannelData, MultiTransportFlags, RdpVersion,
-    SecureAccessSequence, SupportedColorDepths,
+    ClientGccBlocks, ClientMessageChannelData, ClientNetworkData, ClientSecurityData, ColorDepth, ConnectionType,
+    EncryptionMethod, HighColorDepth, KeyboardType, MonitorFlags, MultiTransportChannelData, MultiTransportFlags,
+    RdpVersion, SecureAccessSequence, SupportedColorDepths,
 };
 use ironrdp_pdu::mcs::{self, ConnectInitial};
 use ironrdp_pdu::nego::{self, SecurityProtocol};
@@ -31,7 +32,7 @@ use ironrdp_pdu::rdp::headers::{
 use ironrdp_pdu::rdp::multitransport::MultitransportResponsePdu;
 use ironrdp_pdu::x224::{X224, X224Data};
 use ironrdp_pdu::{PduResult, find_size};
-use ironrdp_svc::{StaticChannelId, SvcMessage, SvcProcessor, SvcServerProcessor};
+use ironrdp_svc::{SvcMessage, SvcProcessor, SvcServerProcessor};
 
 /// Drives an [`Acceptor`] (the server side of the [1.3.1.1] Connection Sequence) with a client byte stream that starts
 /// out valid and turns into fuzzer input partway through.
@@ -53,8 +54,9 @@ use ironrdp_svc::{StaticChannelId, SvcMessage, SvcProcessor, SvcServerProcessor}
 /// The security protocol is always TLS, so CredSSP never runs: it needs a real authentication exchange this oracle
 /// cannot replay.
 /// The TLS upgrade itself is marked as done without any I/O, as a server does after its handshake completes.
-/// Client bytes that arrive while the upgrade is in progress are therefore out of reach: buffering them belongs to the
-/// I/O driver, which this oracle does not run.
+/// Client bytes that arrive after the Connection Request but before the TLS handshake are therefore out of reach: the
+/// I/O driver hands the stream over to TLS with `ironrdp_async::Framed::into_inner_no_leftover`, which drops them, and
+/// this oracle does not run the driver.
 ///
 /// With `Config::REACTIVATION`, the server runs a Deactivation-Reactivation Sequence after accepting the connection: it
 /// rebuilds the acceptor with [`Acceptor::new_deactivation_reactivation`], as `ironrdp-server` does on a resize, and
@@ -73,14 +75,14 @@ use ironrdp_svc::{StaticChannelId, SvcMessage, SvcProcessor, SvcServerProcessor}
 /// - Every channel join the server confirms answers the join the client just requested, names a channel the server
 ///   advertised, and is the first confirm of that channel.
 /// - The Monitor Layout PDU carries a zero `pduSource`.
-/// - The Demand Active advertises the server's own desktop size, or with `Config::HONOR_DESKTOP_SIZE` a size within the
-///   configured maximum, which is the client's requested size when the Connect Initial is replayed.
+/// - The Demand Active advertises the server's own desktop size, or with `Config::HONOR_DESKTOP_SIZE` the size the
+///   client requested, clamped to the configured maximum, when both of its dimensions are in the range the acceptor
+///   honors.
 ///   A reactivation advertises the size the server switched to.
 /// - A Monitor Layout PDU describes a desktop of the size the Demand Active advertised.
 /// - Reaching the accepted state yields a result, and unless the server was configured to accept any credentials, the
 ///   result of the first acceptance carries exactly the expected ones.
-/// - The result of a reactivation is marked as one and keeps the MCS channel IDs and the static channel binding of the
-///   connection it reactivates.
+/// - The result of a reactivation is marked as one and keeps the MCS channel IDs of the connection it reactivates.
 ///
 /// The oracle stops at the first error, as the server's driver does: stepping a consumed or accepted acceptor is a
 /// usage error, not a protocol one.
@@ -112,11 +114,10 @@ pub fn acceptor_state_machine(data: &[u8]) -> AcceptorOutcome {
         .any(|frame| frame.state == "BasicSettingsWaitInitial");
     let mut checks = OutputChecks {
         expected_channels: replayed_connect_initial.then_some(&handshake.channels),
-        desktop_size: match (config.has(Config::HONOR_DESKTOP_SIZE), replayed_connect_initial) {
-            (false, _) => DesktopSizeRule::Exact(SERVER_DESKTOP_SIZE),
-            (true, true) => DesktopSizeRule::Exact(CLIENT_DESKTOP_SIZE),
-            (true, false) => DesktopSizeRule::AtMost(MAX_HONORED_DESKTOP_SIZE),
-        },
+        honored_desktop_size: config
+            .has(Config::HONOR_DESKTOP_SIZE)
+            .then_some(MAX_HONORED_DESKTOP_SIZE),
+        desktop_size: SERVER_DESKTOP_SIZE,
         requested_channels: None,
         channels: None,
         user_channel_id: None,
@@ -156,21 +157,20 @@ pub fn acceptor_state_machine(data: &[u8]) -> AcceptorOutcome {
 
     let mut output = WriteBuf::new();
 
-    loop {
+    let accepted = loop {
         if acceptor.state().is_terminal() {
+            // oracle: mutant handshake builder adding a frame after the one that completes the acceptance
             assert!(
                 replay.next().is_none(),
                 "the acceptor accepted the connection before the replayed handshake ended"
             );
 
-            let result = acceptor
-                .get_result()
-                .unwrap_or_else(|| panic!("an accepted acceptor returned no result"));
+            // oracle: reference crates/ironrdp-acceptor/src/lib.rs §accept_finalize (the driver stops stepping once the acceptor yields its result)
+            let result = acceptor.get_result().expect("an accepted acceptor returned no result");
             let channel_state = ChannelState {
                 user_channel_id: result.user_channel_id,
                 io_channel_id: result.io_channel_id,
                 message_channel_id: result.message_channel_id,
-                fuzz_channel_id: result.static_channels.get_channel_id_by_type::<FuzzChannel>(),
             };
 
             if let Some(accepted) = reactivated {
@@ -179,15 +179,12 @@ pub fn acceptor_state_machine(data: &[u8]) -> AcceptorOutcome {
                     result.reactivation,
                     "the reactivated acceptor returned a result not marked as one"
                 );
-                // oracle: spec MS-RDPBCGR §1.3.1.3 (a reactivation only re-runs the capability exchange and finalization, so the channels stay)
+                // oracle: spec MS-RDPBCGR §1.3.1.3 (a reactivation only re-runs the capability exchange and finalization, so the MCS channels stay)
                 assert_eq!(
                     channel_state, accepted,
-                    "the reactivation changed the channel state of the connection"
+                    "the reactivation changed the MCS channel IDs of the connection"
                 );
-                return AcceptorOutcome {
-                    accepted: true,
-                    takeover,
-                };
+                break true;
             }
 
             // oracle: spec crates/ironrdp-acceptor/src/connection.rs §AcceptorResult::reactivation
@@ -206,10 +203,7 @@ pub fn acceptor_state_machine(data: &[u8]) -> AcceptorOutcome {
             }
 
             if !config.has(Config::REACTIVATION) {
-                return AcceptorOutcome {
-                    accepted: true,
-                    takeover,
-                };
+                break true;
             }
 
             acceptor =
@@ -217,7 +211,7 @@ pub fn acceptor_state_machine(data: &[u8]) -> AcceptorOutcome {
                     .unwrap_or_else(|e| panic!("failed to rebuild the accepted acceptor for a reactivation: {e}"));
             replay = reactivation_replay.clone();
             reactivated = Some(channel_state);
-            checks.desktop_size = DesktopSizeRule::Exact(REACTIVATION_DESKTOP_SIZE);
+            checks.desktop_size = REACTIVATION_DESKTOP_SIZE;
             continue;
         }
 
@@ -228,10 +222,7 @@ pub fn acceptor_state_machine(data: &[u8]) -> AcceptorOutcome {
             }
 
             if !checked_step(&mut acceptor, &mut checks, &mut output, None) {
-                return AcceptorOutcome {
-                    accepted: false,
-                    takeover,
-                };
+                break false;
             }
 
             continue;
@@ -239,11 +230,13 @@ pub fn acceptor_state_machine(data: &[u8]) -> AcceptorOutcome {
 
         if let Some(frame) = replay.next() {
             let state = acceptor.state().name();
+            // oracle: mutant handshake builder labelling a frame for a state other than the one that reads it
             assert_eq!(
                 state, frame.state,
                 "the replayed handshake reached {state} where it expected {}",
                 frame.state
             );
+            // oracle: spec MS-RDPBCGR §1.3.1.1 (each replayed frame is the valid client PDU for the state that reads it)
             assert!(
                 checked_step(&mut acceptor, &mut checks, &mut output, Some(&frame.bytes)),
                 "the acceptor rejected a valid {} frame from the replayed handshake",
@@ -253,6 +246,7 @@ pub fn acceptor_state_machine(data: &[u8]) -> AcceptorOutcome {
         }
 
         // A fully replayed handshake leaves nothing for the acceptor to read before it accepts the connection.
+        // oracle: mutant handshake builder leaving out a frame the acceptor needs
         assert!(
             replay_len < handshake.len(),
             "the acceptor waits for more input in {} after the whole replayed handshake",
@@ -265,28 +259,20 @@ pub fn acceptor_state_machine(data: &[u8]) -> AcceptorOutcome {
 
         // Frame the stream the way the server's I/O driver does: a PDU the hint does not match is read and dropped, and
         // a stream that ends mid-PDU leaves the acceptor waiting for more bytes.
-        let Ok(Some((matched, length))) = hint.find_size(stream) else {
-            return AcceptorOutcome {
-                accepted: false,
-                takeover,
-            };
+        let Ok(Some((matched, length @ 1..))) = hint.find_size(stream) else {
+            break false;
         };
-        if !(0 < length && length <= stream.len()) {
-            return AcceptorOutcome {
-                accepted: false,
-                takeover,
-            };
-        }
-        let (frame, rest) = stream.split_at(length);
+        let Some((frame, rest)) = stream.split_at_checked(length) else {
+            break false;
+        };
         stream = rest;
 
         if matched && !checked_step(&mut acceptor, &mut checks, &mut output, Some(frame)) {
-            return AcceptorOutcome {
-                accepted: false,
-                takeover,
-            };
+            break false;
         }
-    }
+    };
+
+    return AcceptorOutcome { accepted, takeover };
 
     /// Runs one acceptor step and checks the output and state transition.
     ///
@@ -302,16 +288,30 @@ pub fn acceptor_state_machine(data: &[u8]) -> AcceptorOutcome {
         // Record what the client asks for, so the server's answers can be checked against it.
         match (state_before, input) {
             ("BasicSettingsWaitInitial", Some(input)) => {
-                checks.requested_channels = decode::<X224<X224Data<'_>>>(input)
+                let gcc_blocks = decode::<X224<X224Data<'_>>>(input)
                     .ok()
                     .and_then(|payload| decode::<ConnectInitial>(payload.0.data.as_ref()).ok())
-                    .map(|connect_initial| {
-                        let gcc_blocks = connect_initial.conference_create_request.into_gcc_blocks();
-                        RequestedChannels {
-                            statics: gcc_blocks.network.map_or(0, |network| network.channels.len()),
-                            message: gcc_blocks.message_channel.is_some(),
-                        }
+                    .map(|connect_initial| connect_initial.conference_create_request.into_gcc_blocks());
+                if let Some(gcc_blocks) = gcc_blocks {
+                    checks.requested_channels = Some(RequestedChannels {
+                        statics: gcc_blocks.network.map_or(0, |network| network.channels.len()),
+                        message: gcc_blocks.message_channel.is_some(),
                     });
+
+                    // The server clamps the request per dimension to the maximum, and keeps its own size when a clamped
+                    // dimension falls outside the range it honors.
+                    if let Some(max) = checks.honored_desktop_size {
+                        let requested = DesktopSize {
+                            width: gcc_blocks.core.desktop_width.min(max.width),
+                            height: gcc_blocks.core.desktop_height.min(max.height),
+                        };
+                        if HONORED_DESKTOP_DIMENSIONS.contains(&requested.width)
+                            && HONORED_DESKTOP_DIMENSIONS.contains(&requested.height)
+                        {
+                            checks.desktop_size = requested;
+                        }
+                    }
+                }
             }
             ("ChannelConnection", Some(input)) => {
                 if let Ok(request) = decode::<X224<mcs::ChannelJoinRequest>>(input) {
@@ -333,9 +333,10 @@ pub fn acceptor_state_machine(data: &[u8]) -> AcceptorOutcome {
         // malformed PDU, so it is checked either way.
         let mut written = output.filled();
         while !written.is_empty() {
+            // oracle: spec ITU-T T.123 §8 (the TPKT header length covers the whole packet)
             let pdu_info = find_size(written)
                 .unwrap_or_else(|e| panic!("{state_before} wrote bytes that do not start with a PDU header: {e}"))
-                .unwrap_or_else(|| panic!("{state_before} wrote a truncated PDU header"));
+                .expect("the acceptor wrote a truncated PDU header");
             assert!(
                 pdu_info.length <= written.len(),
                 "{state_before} wrote a PDU whose length field ({}) exceeds the bytes written after it ({})",
@@ -459,22 +460,14 @@ pub fn acceptor_state_machine(data: &[u8]) -> AcceptorOutcome {
                                     }),
                                     _ => None,
                                 })
-                                .unwrap_or_else(|| {
-                                    panic!("{state_before} wrote a Demand Active without a Bitmap Capability Set")
-                                });
+                                .expect("the Demand Active carries no Bitmap Capability Set");
 
-                            // oracle: spec crates/ironrdp-acceptor/src/connection.rs §set_honor_client_desktop_size (first round)
+                            // oracle: spec crates/ironrdp-acceptor/src/connection.rs §set_honor_client_desktop_size (first round: the request clamped to the maximum, or the server size when §MIN_DESKTOP_DIM rejects it)
                             // oracle: spec crates/ironrdp-acceptor/src/connection.rs §Acceptor::new_deactivation_reactivation (reactivation)
-                            match checks.desktop_size {
-                                DesktopSizeRule::Exact(expected) => assert_eq!(
-                                    size, expected,
-                                    "{state_before} advertised a desktop size other than the expected one"
-                                ),
-                                DesktopSizeRule::AtMost(max) => assert!(
-                                    size.width <= max.width && size.height <= max.height,
-                                    "{state_before} advertised {size:?}, larger than the maximum {max:?}"
-                                ),
-                            }
+                            assert_eq!(
+                                size, checks.desktop_size,
+                                "{state_before} advertised a desktop size other than the expected one"
+                            );
                             checks.advertised_desktop_size = Some(size);
                         }
                         ("MonitorLayoutSend", mcs::McsMessage::SendDataIndication(data)) => {
@@ -509,9 +502,9 @@ pub fn acceptor_state_machine(data: &[u8]) -> AcceptorOutcome {
                                 "{state_before} wrote a monitor layout without a primary monitor at (0, 0)"
                             );
 
-                            let advertised = checks.advertised_desktop_size.unwrap_or_else(|| {
-                                panic!("{state_before} wrote a monitor layout before any Demand Active")
-                            });
+                            let advertised = checks
+                                .advertised_desktop_size
+                                .expect("the acceptor wrote a monitor layout before any Demand Active");
                             let left = layout.monitors.iter().map(|monitor| i64::from(monitor.left)).min();
                             let top = layout.monitors.iter().map(|monitor| i64::from(monitor.top)).min();
                             let right = layout.monitors.iter().map(|monitor| i64::from(monitor.right)).max();
@@ -586,7 +579,7 @@ pub struct Takeover {
 
 /// A valid input for [`acceptor_state_machine`].
 pub struct AcceptorSeed {
-    /// File name of the seed in the regression corpus, without extension.
+    /// Names the configuration and the state in which the fuzzer input takes over.
     pub name: String,
     /// What the oracle reports for this seed.
     pub outcome: AcceptorOutcome,
@@ -601,8 +594,7 @@ pub fn acceptor_state_machine_seeds(config: u8) -> Vec<AcceptorSeed> {
     let handshake = cached_client_handshake(Config(config));
     let frames: Vec<&ClientFrame> = handshake.connection.iter().chain(&handshake.reactivation).collect();
     let config_byte = |replay_len: usize| {
-        let replay_len =
-            u8::try_from(replay_len).unwrap_or_else(|_| panic!("the handshake has more frames than a seed can replay"));
+        let replay_len = u8::try_from(replay_len).expect("the handshake has more frames than a seed can replay");
         [replay_len, config]
     };
 
@@ -682,6 +674,9 @@ const MAX_HONORED_DESKTOP_SIZE: DesktopSize = DesktopSize {
     width: 1920,
     height: 1080,
 };
+
+/// Desktop dimensions the acceptor honors from a client, see `MIN_DESKTOP_DIM` in `ironrdp-acceptor`.
+const HONORED_DESKTOP_DIMENSIONS: RangeInclusive<u16> = 200..=8192;
 
 /// Desktop size the server switches to in a Deactivation-Reactivation Sequence.
 const REACTIVATION_DESKTOP_SIZE: DesktopSize = DesktopSize {
@@ -771,8 +766,10 @@ struct ServerChannels {
 struct OutputChecks<'a> {
     /// Channels the server must advertise, known when the Connect Initial that decides them is the replayed one.
     expected_channels: Option<&'a ServerChannels>,
+    /// Maximum desktop size the server honors from the client's request, when it honors one.
+    honored_desktop_size: Option<DesktopSize>,
     /// Desktop size the next Demand Active must advertise.
-    desktop_size: DesktopSizeRule,
+    desktop_size: DesktopSize,
     /// Channels the client's Connect Initial asked for.
     requested_channels: Option<RequestedChannels>,
     /// Channels the Connect Response advertised.
@@ -794,15 +791,6 @@ struct RequestedChannels {
     statics: usize,
     /// Whether the client asks for a message channel.
     message: bool,
-}
-
-/// Desktop size a Demand Active must advertise.
-#[derive(Clone, Copy)]
-enum DesktopSizeRule {
-    /// Exactly this size.
-    Exact(DesktopSize),
-    /// Any size no larger than this one in either dimension.
-    AtMost(DesktopSize),
 }
 
 /// Builds the valid client side of a TLS connection sequence for `config`.
@@ -854,6 +842,10 @@ fn client_handshake(config: Config) -> ClientHandshake {
                 high_color_depth: Some(HighColorDepth::Bpp24),
                 supported_color_depths: Some(SupportedColorDepths::BPP32 | SupportedColorDepths::BPP24),
                 early_capability_flags: Some(early_capability_flags),
+                dig_product_id: Some(String::new()),
+                connection_type: Some(ConnectionType::NotUsed),
+                // MS-RDPBCGR 2.2.1.3.2: serverSelectedProtocol MUST be present after an RDP Negotiation Request.
+                server_selected_protocol: Some(SecurityProtocol::SSL),
                 ..Default::default()
             },
         },
@@ -984,7 +976,46 @@ fn client_handshake(config: Config) -> ClientHandshake {
                     originator_id: capability_sets::SERVER_CHANNEL_ID,
                     pdu: DemandActive {
                         source_descriptor: "MSTSC".to_owned(),
-                        capability_sets: client_capability_sets(),
+                        // [2.2.7.1.1] General Capability Set, [2.2.7.1.2] Bitmap Capability Set, [2.2.7.1.3] Order
+                        // Capability Set and [2.2.7.1.6] Input Capability Set say that both client and server send
+                        // these sets, and the values follow what those sections require of a client.
+                        //
+                        // [2.2.7.1.1]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr/41dc6845-07dc-4af6-bc14-d8281acd4877
+                        // [2.2.7.1.2]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr/76670547-e35c-4b95-a242-5729a21b83f6
+                        // [2.2.7.1.3]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr/9f409c29-480c-4751-9665-510b8ffff294
+                        // [2.2.7.1.6]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr/b3bc76ae-9ee5-454f-b197-ede845ca69cc
+                        capability_sets: vec![
+                            CapabilitySet::General(General {
+                                major_platform_type: MajorPlatformType::UNIX,
+                                minor_platform_type: MinorPlatformType::UNSPECIFIED,
+                                protocol_version: PROTOCOL_VER,
+                                extra_flags: GeneralExtraFlags::FASTPATH_OUTPUT_SUPPORTED
+                                    | GeneralExtraFlags::NO_BITMAP_COMPRESSION_HDR,
+                                refresh_rect_support: false,
+                                suppress_output_support: false,
+                            }),
+                            CapabilitySet::Bitmap(capability_sets::Bitmap {
+                                pref_bits_per_pix: 32,
+                                desktop_width: CLIENT_DESKTOP_SIZE.width,
+                                desktop_height: CLIENT_DESKTOP_SIZE.height,
+                                desktop_resize_flag: true,
+                                drawing_flags: capability_sets::BitmapDrawingFlags::empty(),
+                            }),
+                            CapabilitySet::Order(Order::new(
+                                OrderFlags::NEGOTIATE_ORDER_SUPPORT | OrderFlags::ZERO_BOUNDS_DELTAS_SUPPORT,
+                                OrderSupportExFlags::empty(),
+                                480 * 480,
+                                0,
+                            )),
+                            CapabilitySet::Input(Input {
+                                input_flags: InputFlags::SCANCODES | InputFlags::MOUSEX | InputFlags::UNICODE,
+                                keyboard_layout: CLIENT_KEYBOARD_LAYOUT,
+                                keyboard_type: Some(KeyboardType::IBM_ENHANCED),
+                                keyboard_subtype: 0,
+                                keyboard_function_key: CLIENT_FUNCTION_KEYS,
+                                keyboard_ime_filename: String::new(),
+                            }),
+                        ],
                     },
                 }),
             },
@@ -1056,46 +1087,6 @@ struct ChannelState {
     user_channel_id: u16,
     io_channel_id: u16,
     message_channel_id: Option<u16>,
-    /// Channel ID bound to [`FuzzChannel`], if the client asked for it.
-    fuzz_channel_id: Option<StaticChannelId>,
-}
-
-/// Capability sets the client sends in its Confirm Active.
-///
-/// MS-RDPBCGR 2.2.7.1.1, 2.2.7.1.2, 2.2.7.1.3 and 2.2.7.1.6 say that both client and server send these sets, and the
-/// values follow what those sections require of a client.
-fn client_capability_sets() -> Vec<CapabilitySet> {
-    vec![
-        CapabilitySet::General(General {
-            major_platform_type: MajorPlatformType::UNIX,
-            minor_platform_type: MinorPlatformType::UNSPECIFIED,
-            protocol_version: PROTOCOL_VER,
-            extra_flags: GeneralExtraFlags::FASTPATH_OUTPUT_SUPPORTED | GeneralExtraFlags::NO_BITMAP_COMPRESSION_HDR,
-            refresh_rect_support: false,
-            suppress_output_support: false,
-        }),
-        CapabilitySet::Bitmap(capability_sets::Bitmap {
-            pref_bits_per_pix: 32,
-            desktop_width: CLIENT_DESKTOP_SIZE.width,
-            desktop_height: CLIENT_DESKTOP_SIZE.height,
-            desktop_resize_flag: true,
-            drawing_flags: capability_sets::BitmapDrawingFlags::empty(),
-        }),
-        CapabilitySet::Order(Order::new(
-            OrderFlags::NEGOTIATE_ORDER_SUPPORT | OrderFlags::ZERO_BOUNDS_DELTAS_SUPPORT,
-            OrderSupportExFlags::empty(),
-            480 * 480,
-            0,
-        )),
-        CapabilitySet::Input(Input {
-            input_flags: InputFlags::SCANCODES | InputFlags::MOUSEX | InputFlags::UNICODE,
-            keyboard_layout: CLIENT_KEYBOARD_LAYOUT,
-            keyboard_type: Some(KeyboardType::IBM_ENHANCED),
-            keyboard_subtype: 0,
-            keyboard_function_key: CLIENT_FUNCTION_KEYS,
-            keyboard_ime_filename: String::new(),
-        }),
-    ]
 }
 
 fn client_credentials() -> Credentials {
