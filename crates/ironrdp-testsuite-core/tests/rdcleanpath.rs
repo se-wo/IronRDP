@@ -157,9 +157,60 @@ fn detect(#[case] der: &[u8]) {
 #[case(&[0x30, 0x32, 0xA0, 0x4, 0x2])]
 #[case(&[0x30, 0x32, 0xA0, 0x4, 0x2, 0x2])]
 #[case(&[0x30, 0x32, 0xA0, 0x4, 0x2, 0x2, 0xD])]
+// oracle: spec ITU-T X.690 §8.1.3.5 (0x82 announces two subsequent length octets)
+#[case::long_form_length_split(&[0x30, 0x82, 0x01])]
+// oracle: spec ITU-T X.690 §8.1.3.5 (0x84 announces four subsequent length octets)
+#[case::long_form_length_missing_last_octet(&[0x30, 0x84, 0x00, 0x01, 0x00])]
 fn detect_not_enough(#[case] payload: &[u8]) {
     let result = RDCleanPathPdu::detect(payload);
     assert_eq!(result, DetectionResult::NotEnoughBytes);
+}
+
+#[rstest]
+// oracle: spec ITU-T X.690 §8.1.2 (0xA1 is the context-specific constructed tag [1]) and §8.1.3.4 (five content octets, all present)
+#[case::first_field_not_version(&[0x30, 0x05, 0xA1, 0x03, 0x02, 0x01, 0x00])]
+// oracle: spec ITU-T X.690 §8.1.2.3 (one identifier octet holds a tag number below 31, so 0xA1 alone decides the tag)
+#[case::first_field_tag_not_version(&[0x30, 0x05, 0xA1])]
+// oracle: spec ITU-T X.690 §8.1.3.4 (a zero length leaves no room for the version)
+#[case::empty_sequence(&[0x30, 0x00])]
+// oracle: spec ITU-T X.690 §8.1.3.4 (the three content octets of the SEQUENCE end inside the four-octet [0] field)
+#[case::version_overruns_sequence(&[0x30, 0x03, 0xA0, 0x04, 0x02, 0x02, 0x0D, 0x3E])]
+// oracle: spec ITU-T X.690 §8.3.2 (a DER INTEGER uses the fewest octets, so a u64 takes at most nine content octets, not 249)
+#[case::version_longer_than_any_u64(&[
+    0x30, 0x82, 0x01, 0x00, 0xA0, 0x81, 0xFC, 0x02, 0x81, 0xF9, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+])]
+// oracle: spec ITU-T X.690 §8.11 (0x31 is a SET, not the SEQUENCE an RDCleanPath PDU is)
+#[case::not_a_sequence(&[0x31, 0x06, 0xA0, 0x04, 0x02, 0x02, 0x0D, 0x3E])]
+// oracle: spec ITU-T X.690 §8.1.2.3 (the identifier octet 0x03 is not the SEQUENCE an RDCleanPath PDU is, so the
+// missing length octets cannot change the outcome)
+#[case::tpkt_version_byte(&[0x03])]
+// oracle: spec ITU-T X.690 §8.1.3.5 (four length octets declaring 16 MiB of content)
+#[case::declared_length_16_mib(&[0x30, 0x84, 0x01, 0x00, 0x00, 0x00, 0xA0, 0x04, 0x02, 0x02, 0x0D, 0x3E])]
+// oracle: spec ITU-T X.690 §8.1.3.5 (four length octets declaring 4 GiB minus one octet of content)
+#[case::declared_length_u32_max(&[0x30, 0x84, 0xFF, 0xFF, 0xFF, 0xFF, 0xA0, 0x04, 0x02, 0x02, 0x0D, 0x3E])]
+fn detect_failed(#[case] payload: &[u8]) {
+    let result = RDCleanPathPdu::detect(payload);
+    assert_eq!(result, DetectionResult::Failed);
+}
+
+// oracle: reference OpenSSL SSL_MAX_CERT_LIST_DEFAULT (a proxy using OpenSSL accepts a 100 KiB certificate chain by default)
+#[test]
+fn detect_accepts_100_kib_certificate_chain() {
+    let chain = core::iter::repeat_n(vec![0xAB; 25 * 1024], 4);
+    let der = RDCleanPathPdu::new_response("192.168.7.95".to_owned(), vec![0xDE, 0xAD, 0xBE, 0xFF], chain)
+        .unwrap()
+        .to_der()
+        .unwrap();
+
+    let result = RDCleanPathPdu::detect(&der);
+
+    assert_eq!(
+        result,
+        DetectionResult::Detected {
+            version: VERSION_1,
+            total_length: der.len(),
+        }
+    );
 }
 
 #[test]

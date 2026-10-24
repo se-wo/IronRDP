@@ -148,11 +148,19 @@ pub fn bulk_round_trip(data: &[u8]) {
 ///
 /// A framer reads more input for as long as its hint returns `None`, so a hint that does so for complete input that
 /// can never frame a PDU lets the peer make the framer buffer whatever it sends.
+/// The RDCleanPath hints in `ironrdp-client` and `ironrdp-web` return `None` exactly when
+/// `RDCleanPathPdu::detect` returns `NotEnoughBytes`, so this checks `detect` directly.
 pub fn pdu_hint(data: &[u8]) {
     use ironrdp_pdu::{CREDSSP_TS_REQUEST_HINT, FAST_PATH_HINT, PduHint, RDP_HINT, X224_HINT};
+    use ironrdp_rdcleanpath::der::{Decode as _, Encode as _};
+    use ironrdp_rdcleanpath::{DetectionResult, MAX_PDU_LEN, RDCleanPathPdu};
 
     // The longest header any of these hints reads: a TPKT header, or a BER SEQUENCE tag with two length octets.
     const MAX_HEADER_LEN: usize = 4;
+
+    // A DER SEQUENCE header with four length octets, then the version field: a `[0] EXPLICIT INTEGER` whose two
+    // headers take two bytes each and whose `u64` content takes at most nine.
+    const MAX_RDCLEANPATH_PREFIX_LEN: usize = 6 + 2 + 2 + 9;
 
     let hints: [&dyn PduHint; 4] = [&RDP_HINT, &X224_HINT, &FAST_PATH_HINT, &CREDSSP_TS_REQUEST_HINT];
 
@@ -164,6 +172,36 @@ pub fn pdu_hint(data: &[u8]) {
                 data.len()
             );
         }
+    }
+
+    match RDCleanPathPdu::detect(data) {
+        DetectionResult::NotEnoughBytes => {
+            assert!(
+                data.len() < MAX_RDCLEANPATH_PREFIX_LEN,
+                "RDCleanPathPdu::detect asked for more bytes after {} bytes, which hold a whole version field",
+                data.len()
+            );
+
+            let declared_len = ironrdp_rdcleanpath::der::SliceReader::new(data)
+                .and_then(|mut reader| ironrdp_rdcleanpath::der::Header::decode(&mut reader))
+                .and_then(|header| header.encoded_len() + header.length())
+                .ok()
+                .and_then(|len| usize::try_from(len).ok());
+
+            if let Some(declared_len) = declared_len {
+                assert!(
+                    data.len() < declared_len,
+                    "RDCleanPathPdu::detect asked for more than the {declared_len} bytes the PDU declares"
+                );
+            }
+        }
+        DetectionResult::Detected { total_length, .. } => {
+            assert!(
+                total_length <= MAX_PDU_LEN,
+                "RDCleanPathPdu::detect accepted a declared length of {total_length} bytes"
+            );
+        }
+        DetectionResult::Failed => {}
     }
 }
 

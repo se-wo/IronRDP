@@ -12,9 +12,9 @@ use tracing::{debug, trace};
 /// A correct hint determines the size from a header of a few bytes, so a hint still undecided past this point
 /// is fed input that never frames, and reading on would buffer whatever the peer sends.
 /// The largest TPKT frame fits, which leaves room for a hint that needs a whole frame to decide.
-// UNTESTED: this limit is the only bound on the RDCleanPath hints in `ironrdp-client` and `ironrdp-web`.
-// `RDCleanPathPdu::detect` reports `NotEnoughBytes` for a complete header whose first element is not `[0]`, and the
-// `pdu_hint` fuzz target covers only the `ironrdp-pdu` hints.
+// UNTESTED: the RDCleanPath hints in `ironrdp-client` and `ironrdp-web` must also determine a size well within this
+// limit; the `pdu_hint` fuzz target checks `RDCleanPathPdu::detect`, but not that these hints return `None` only for
+// `DetectionResult::NotEnoughBytes`.
 // When raising or removing this limit, or adding a hint, check which hints can stay undecided on complete input.
 const MAX_UNSIZED_BUFFER_LEN: usize = 64 * 1024;
 

@@ -462,6 +462,7 @@ dependencies = [
  "ironrdp-egfx",
  "ironrdp-graphics",
  "ironrdp-pdu",
+ "ironrdp-rdcleanpath",
  "ironrdp-rdpdr",
  "ironrdp-rdpel",
  "ironrdp-rdpemt",
@@ -508,6 +509,13 @@ dependencies = [
  "sha1",
  "tap",
  "x509-cert",
+]
+
+[[package]]
+name = "ironrdp-rdcleanpath"
+version = "0.3.0"
+dependencies = [
+ "der 0.8.2",
 ]
 
 [[package]]

@@ -27,6 +27,7 @@ ironrdp-dvc.path = "../ironrdp-dvc"
 ironrdp-egfx = { path = "../ironrdp-egfx", features = ["arbitrary"] }
 ironrdp-svc.path = "../ironrdp-svc"
 ironrdp-rdpel.path = "../ironrdp-rdpel"
+ironrdp-rdcleanpath.path = "../ironrdp-rdcleanpath"
 
 [lints]
 workspace = true
