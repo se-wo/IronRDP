@@ -108,31 +108,73 @@ fn check_rdpsnd_codec_decode() {
     check!(rdpsnd_codec_decode);
 }
 
-// oracle: spec MS-RDPBCGR §1.3.1.1 (a seed holds a valid connection sequence from the state it names on, so the server accepts it)
 #[test]
-#[expect(
-    clippy::print_stdout,
-    reason = "names each input before the oracle runs, as `check!` does, so a panic points at its file"
-)]
 fn check_acceptor_state_machine() {
-    const REGRESSION_DATA_FOLDER: &str = concat!(
+    check!(acceptor_state_machine);
+}
+
+// oracle: spec MS-RDPBCGR §1.3.1.1 (each seed passes a valid connection sequence from the state it names on, so the server accepts it)
+#[test]
+fn acceptor_state_machine_accepts_every_seed() {
+    use ironrdp_fuzzing::oracles;
+
+    for config in u8::MIN..=u8::MAX {
+        for seed in oracles::acceptor_state_machine_seeds(config) {
+            assert_eq!(
+                oracles::acceptor_state_machine(&seed.bytes),
+                seed.outcome,
+                "{}",
+                seed.name
+            );
+        }
+    }
+}
+
+// oracle: mutant committed seed corpus drifting from the handshake the acceptor oracle replays
+#[test]
+fn acceptor_state_machine_corpus_holds_the_generated_seeds() {
+    use ironrdp_fuzzing::oracles;
+
+    const FOLDER: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/test_data/fuzz_regression/acceptor_state_machine"
     );
+    // A configuration with every option off, two that cover every option between them, and the second one with a
+    // reactivation.
+    const CORPUS_CONFIGS: [u8; 4] = [0x00, 0x3b, 0x44, 0xbb];
 
-    // Seeds must get through the whole handshake, while other regression inputs only must not panic.
-    for entry in std::fs::read_dir(REGRESSION_DATA_FOLDER).unwrap() {
+    let update = std::env::var("UPDATE_EXPECT").is_ok_and(|value| value == "1");
+    let seeds: Vec<_> = CORPUS_CONFIGS
+        .into_iter()
+        .flat_map(oracles::acceptor_state_machine_seeds)
+        .collect();
+
+    for seed in &seeds {
+        let path = format!("{FOLDER}/{}.bin", seed.name);
+        if update {
+            std::fs::write(&path, &seed.bytes).unwrap();
+        } else {
+            assert_eq!(
+                std::fs::read(&path).ok().as_ref(),
+                Some(&seed.bytes),
+                "{path} does not hold the generated seed; run with UPDATE_EXPECT=1 to regenerate the corpus"
+            );
+        }
+    }
+
+    for entry in std::fs::read_dir(FOLDER).unwrap() {
         let path = entry.unwrap().path();
-        println!("Check {}", path.display());
-        let accepted = ironrdp_fuzzing::oracles::acceptor_state_machine(&std::fs::read(&path).unwrap());
-        let is_seed = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with("seed-"));
-        assert!(
-            accepted || !is_seed,
-            "{} holds a valid handshake, but the acceptor did not accept it",
-            path.display()
-        );
+        let name = path.file_stem().and_then(|stem| stem.to_str()).unwrap_or_default();
+        if !name.starts_with("seed-") || seeds.iter().any(|seed| seed.name == name) {
+            continue;
+        }
+        if update {
+            std::fs::remove_file(&path).unwrap();
+        } else {
+            panic!(
+                "{} is not a generated seed; run with UPDATE_EXPECT=1 to regenerate the corpus",
+                path.display()
+            );
+        }
     }
 }

@@ -12,7 +12,9 @@
 
 mod acceptor;
 
-pub use self::acceptor::acceptor_state_machine;
+pub use self::acceptor::{
+    AcceptorOutcome, AcceptorSeed, Takeover, acceptor_state_machine, acceptor_state_machine_seeds,
+};
 use crate::generators::BitmapInput;
 
 // Bulk decompression oracles. Each target is algorithm-pinned so libFuzzer
