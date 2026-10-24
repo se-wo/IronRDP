@@ -295,7 +295,8 @@ impl Acceptor {
     ///
     /// When `creds` is set and the connection does not use CredSSP, the acceptor rejects a Client Info PDU carrying any
     /// other credentials, so [`AcceptorResult::credentials`] can only hold `creds`.
-    /// It tells the client with a Set Error Info PDU only when the client advertised support for that PDU.
+    /// The failing step writes a Set Error Info PDU to its output only when the client advertised support for that PDU.
+    /// [`accept_finalize`](crate::accept_finalize) returns the step error without sending that output.
     pub fn new(
         security: SecurityProtocol,
         desktop_size: DesktopSize,
