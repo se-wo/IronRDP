@@ -255,24 +255,22 @@ impl RDCleanPathPdu {
     /// Try to parse first few bytes in order to detect a RDCleanPath PDU
     ///
     /// Returns [`DetectionResult::NotEnoughBytes`] only while `src` ends before the version field does, which is at
-    /// most 19 bytes into the PDU: a SEQUENCE header with four length octets, then the version field.
+    /// most 18 bytes into the PDU: a SEQUENCE header with three length octets, then the version field.
+    /// A header with four length octets declares more than [`MAX_PDU_LEN`] bytes.
     /// Returns [`DetectionResult::Failed`] when the PDU declares more than [`MAX_PDU_LEN`] bytes, so that a caller
     /// buffering the declared length cannot be made to reserve gigabytes.
     pub fn detect(src: &[u8]) -> DetectionResult {
-        use der::{Decode as _, Encode as _, Reader as _};
+        use der::{Decode as _, Encode as _};
 
         let Ok(mut slice_reader) = der::SliceReader::new(src) else {
             return DetectionResult::Failed;
         };
 
-        // The identifier octet alone rules out input that is not a SEQUENCE, before its length octets arrive.
-        match der::Tag::peek(&slice_reader) {
-            Ok(der::Tag::Sequence) => {}
-            Ok(_) => return DetectionResult::Failed,
-            Err(e) => match e.kind() {
-                der::ErrorKind::Incomplete { .. } => return DetectionResult::NotEnoughBytes,
-                _ => return DetectionResult::Failed,
-            },
+        // 0x30 is the only identifier octet of a SEQUENCE, so the first byte alone rules out any other input.
+        match src.first() {
+            None => return DetectionResult::NotEnoughBytes,
+            Some(0x30) => {}
+            Some(_) => return DetectionResult::Failed,
         }
 
         let header = match der::Header::decode(&mut slice_reader) {
@@ -294,12 +292,13 @@ impl RDCleanPathPdu {
             return DetectionResult::Failed;
         };
 
-        if MAX_PDU_LEN < total_length {
+        let is_within_limit = total_length <= MAX_PDU_LEN;
+        if !is_within_limit {
             return DetectionResult::Failed;
         }
 
-        // The version is the first field of the body, and no valid encoding of it is longer than
-        // MAX_VERSION_FIELD_LEN, so detection reads no further.
+        // The version is the first field of the body, and no valid encoding of it is longer than MAX_VERSION_FIELD_LEN,
+        // so detection reads no further.
         let version_field_window = body_length.min(MAX_VERSION_FIELD_LEN);
         let Some((_, body)) = src.split_at_checked(header_encoded_len) else {
             return DetectionResult::Failed;
@@ -317,7 +316,7 @@ impl RDCleanPathPdu {
                 total_length,
             },
             // `decode_explicit` also returns `None` when the next field has another tag, which more bytes cannot fix.
-            Ok(None) if is_truncated && version_reader.is_finished() => DetectionResult::NotEnoughBytes,
+            Ok(None) if is_truncated && version_field.is_empty() => DetectionResult::NotEnoughBytes,
             Err(e) if is_truncated && matches!(e.kind(), der::ErrorKind::Incomplete { .. }) => {
                 DetectionResult::NotEnoughBytes
             }

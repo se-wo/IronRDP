@@ -148,8 +148,8 @@ pub fn bulk_round_trip(data: &[u8]) {
 ///
 /// A framer reads more input for as long as its hint returns `None`, so a hint that does so for complete input that
 /// can never frame a PDU lets the peer make the framer buffer whatever it sends.
-/// The RDCleanPath hints in `ironrdp-client` and `ironrdp-web` return `None` exactly when
-/// `RDCleanPathPdu::detect` returns `NotEnoughBytes`, so this checks `detect` directly.
+/// The RDCleanPath hints in `ironrdp-client` and `ironrdp-web` return `None` exactly when `RDCleanPathPdu::detect`
+/// returns `NotEnoughBytes`, so this checks `detect` directly.
 pub fn pdu_hint(data: &[u8]) {
     use ironrdp_pdu::{CREDSSP_TS_REQUEST_HINT, FAST_PATH_HINT, PduHint, RDP_HINT, X224_HINT};
     use ironrdp_rdcleanpath::der::{Decode as _, Encode as _};
@@ -158,9 +158,10 @@ pub fn pdu_hint(data: &[u8]) {
     // The longest header any of these hints reads: a TPKT header, or a BER SEQUENCE tag with two length octets.
     const MAX_HEADER_LEN: usize = 4;
 
-    // A DER SEQUENCE header with four length octets, then the version field: a `[0] EXPLICIT INTEGER` whose two
-    // headers take two bytes each and whose `u64` content takes at most nine.
-    const MAX_RDCLEANPATH_PREFIX_LEN: usize = 6 + 2 + 2 + 9;
+    // A DER SEQUENCE header with three length octets, then the version field: a `[0] EXPLICIT INTEGER` holding a `u64`.
+    // Four length octets declare at least 16 MiB, more than `MAX_PDU_LEN`, so `detect` rejects such a header outright.
+    const MAX_RDCLEANPATH_PREFIX_LEN: usize =
+        5 /* SEQUENCE header */ + 2 /* [0] header */ + 2 /* INTEGER header */ + 9 /* INTEGER content */;
 
     let hints: [&dyn PduHint; 4] = [&RDP_HINT, &X224_HINT, &FAST_PATH_HINT, &CREDSSP_TS_REQUEST_HINT];
 
@@ -174,6 +175,8 @@ pub fn pdu_hint(data: &[u8]) {
         }
     }
 
+    // oracle: spec crates/ironrdp-rdcleanpath/src/lib.rs §detect (`NotEnoughBytes` only while `src` ends before the
+    // version field) and §MAX_PDU_LEN (the largest PDU `detect` accepts)
     match RDCleanPathPdu::detect(data) {
         DetectionResult::NotEnoughBytes => {
             assert!(

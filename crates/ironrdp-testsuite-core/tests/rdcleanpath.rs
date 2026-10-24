@@ -159,15 +159,19 @@ fn detect(#[case] der: &[u8]) {
 #[case(&[0x30, 0x32, 0xA0, 0x4, 0x2, 0x2, 0xD])]
 // oracle: spec ITU-T X.690 §8.1.3.5 (0x82 announces two subsequent length octets)
 #[case::long_form_length_split(&[0x30, 0x82, 0x01])]
-// oracle: spec ITU-T X.690 §8.1.3.5 (0x84 announces four subsequent length octets)
-#[case::long_form_length_missing_last_octet(&[0x30, 0x84, 0x00, 0x01, 0x00])]
+// oracle: spec ITU-T X.690 §8.1.3.5 (0x83 announces three subsequent length octets, and two are present) and §10.1
+// (three octets are the shortest form of the 65536 to 131071 octets they can declare)
+#[case::long_form_length_missing_last_octet(&[0x30, 0x83, 0x01, 0x00])]
 fn detect_not_enough(#[case] payload: &[u8]) {
     let result = RDCleanPathPdu::detect(payload);
     assert_eq!(result, DetectionResult::NotEnoughBytes);
 }
 
+// oracle: spec crates/ironrdp-rdcleanpath/src/lib.rs §RDCleanPathPdu (a SEQUENCE whose first, mandatory field is
+// the `[0]` version) and §detect (`NotEnoughBytes` only while `src` ends before the version field)
 #[rstest]
-// oracle: spec ITU-T X.690 §8.1.2 (0xA1 is the context-specific constructed tag [1]) and §8.1.3.4 (five content octets, all present)
+// oracle: spec ITU-T X.690 §8.1.2 (0xA1 is the context-specific constructed tag [1]) and §8.1.3.4 (five content
+// octets, all present)
 #[case::first_field_not_version(&[0x30, 0x05, 0xA1, 0x03, 0x02, 0x01, 0x00])]
 // oracle: spec ITU-T X.690 §8.1.2.3 (one identifier octet holds a tag number below 31, so 0xA1 alone decides the tag)
 #[case::first_field_tag_not_version(&[0x30, 0x05, 0xA1])]
@@ -175,25 +179,51 @@ fn detect_not_enough(#[case] payload: &[u8]) {
 #[case::empty_sequence(&[0x30, 0x00])]
 // oracle: spec ITU-T X.690 §8.1.3.4 (the three content octets of the SEQUENCE end inside the four-octet [0] field)
 #[case::version_overruns_sequence(&[0x30, 0x03, 0xA0, 0x04, 0x02, 0x02, 0x0D, 0x3E])]
-// oracle: spec ITU-T X.690 §8.3.2 (a DER INTEGER uses the fewest octets, so a u64 takes at most nine content octets, not 249)
+// oracle: spec ITU-T X.690 §8.3.2 (a DER INTEGER uses the fewest octets, so a u64 takes at most nine content
+// octets, not 249)
 #[case::version_longer_than_any_u64(&[
     0x30, 0x82, 0x01, 0x00, 0xA0, 0x81, 0xFC, 0x02, 0x81, 0xF9, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 ])]
-// oracle: spec ITU-T X.690 §8.11 (0x31 is a SET, not the SEQUENCE an RDCleanPath PDU is)
+// oracle: spec ITU-T X.680 §8.4 (Table 1 assigns UNIVERSAL 17 to SET) and ITU-T X.690 §8.1.2 (0x31 is that tag,
+// constructed)
 #[case::not_a_sequence(&[0x31, 0x06, 0xA0, 0x04, 0x02, 0x02, 0x0D, 0x3E])]
-// oracle: spec ITU-T X.690 §8.1.2.3 (the identifier octet 0x03 is not the SEQUENCE an RDCleanPath PDU is, so the
-// missing length octets cannot change the outcome)
+// oracle: spec ITU-T X.690 §8.1.2.3 (0x03 is a one-octet identifier for a tag other than SEQUENCE, so the missing
+// length octets cannot change the outcome)
 #[case::tpkt_version_byte(&[0x03])]
-// oracle: spec ITU-T X.690 §8.1.3.5 (four length octets declaring 16 MiB of content)
+// oracle: spec ITU-T X.690 §8.1.2.2 (0x5F is an APPLICATION tag) and §8.1.2.4 (its tag number continues in later
+// octets, which cannot make it a SEQUENCE)
+#[case::multi_octet_tag(&[0x5F])]
+// oracle: spec crates/ironrdp-rdcleanpath/src/lib.rs §MAX_PDU_LEN (the largest PDU `detect` accepts is 256 KiB) and
+// ITU-T X.690 §8.1.3.5 (three length octets declaring 262140 content octets after a 5-octet header)
+#[case::declared_length_one_over_limit(&[0x30, 0x83, 0x03, 0xFF, 0xFC, 0xA0, 0x04, 0x02, 0x02, 0x0D, 0x3E])]
+// oracle: spec crates/ironrdp-rdcleanpath/src/lib.rs §MAX_PDU_LEN and ITU-T X.690 §8.1.3.5 (four length octets
+// declaring 16 MiB of content)
 #[case::declared_length_16_mib(&[0x30, 0x84, 0x01, 0x00, 0x00, 0x00, 0xA0, 0x04, 0x02, 0x02, 0x0D, 0x3E])]
-// oracle: spec ITU-T X.690 §8.1.3.5 (four length octets declaring 4 GiB minus one octet of content)
+// oracle: spec crates/ironrdp-rdcleanpath/src/lib.rs §MAX_PDU_LEN and ITU-T X.690 §8.1.3.5 (four length octets
+// declaring 4 GiB minus one octet of content)
 #[case::declared_length_u32_max(&[0x30, 0x84, 0xFF, 0xFF, 0xFF, 0xFF, 0xA0, 0x04, 0x02, 0x02, 0x0D, 0x3E])]
 fn detect_failed(#[case] payload: &[u8]) {
     let result = RDCleanPathPdu::detect(payload);
     assert_eq!(result, DetectionResult::Failed);
 }
 
-// oracle: reference OpenSSL SSL_MAX_CERT_LIST_DEFAULT (a proxy using OpenSSL accepts a 100 KiB certificate chain by default)
+// oracle: spec crates/ironrdp-rdcleanpath/src/lib.rs §MAX_PDU_LEN (the largest PDU `detect` accepts is 256 KiB) and
+// ITU-T X.690 §8.1.3.5 (three length octets declaring 262139 content octets after a 5-octet header)
+#[test]
+fn detect_accepts_declared_length_at_limit() {
+    let result = RDCleanPathPdu::detect(&[0x30, 0x83, 0x03, 0xFF, 0xFB, 0xA0, 0x04, 0x02, 0x02, 0x0D, 0x3E]);
+
+    assert_eq!(
+        result,
+        DetectionResult::Detected {
+            version: VERSION_1,
+            total_length: 256 * 1024,
+        }
+    );
+}
+
+// oracle: reference OpenSSL SSL_MAX_CERT_LIST_DEFAULT (a proxy using OpenSSL accepts a 100 KiB certificate chain by
+// default)
 #[test]
 fn detect_accepts_100_kib_certificate_chain() {
     let chain = core::iter::repeat_n(vec![0xAB; 25 * 1024], 4);
