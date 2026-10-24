@@ -110,13 +110,18 @@ fn check_rdpsnd_codec_decode() {
 
 // oracle: spec MS-RDPBCGR §1.3.1.1 (each seed passes a valid connection sequence from the state it names on, so the server accepts it)
 #[test]
+#[expect(
+    clippy::print_stdout,
+    reason = "names the case an assertion inside the oracle fails on, as `check!` does"
+)]
 fn acceptor_state_machine_accepts_every_seed() {
     use ironrdp_fuzzing::oracles;
 
     for config in u8::MIN..=u8::MAX {
         for seed in oracles::acceptor_state_machine_seeds(config) {
+            println!("Check {}", seed.name);
             let outcome = oracles::acceptor_state_machine(&seed.bytes);
-            assert_eq!(outcome.accepted, seed.outcome.accepted, "{}", seed.name);
+            assert!(outcome.accepted, "{}", seed.name);
             // oracle: mutant seed whose replay length no longer stops at the state it is named for
             assert_eq!(outcome.takeover, seed.outcome.takeover, "{}", seed.name);
         }
@@ -125,27 +130,81 @@ fn acceptor_state_machine_accepts_every_seed() {
 
 // oracle: spec crates/ironrdp-fuzzing/src/oracles/acceptor.rs §acceptor_state_machine (no panic: every step satisfies the invariants listed there, whatever client PDU a typed frame carries)
 #[test]
+#[expect(
+    clippy::print_stdout,
+    reason = "names the case an assertion inside the oracle fails on, as `check!` does"
+)]
 fn acceptor_state_machine_holds_for_typed_frames() {
-    use ironrdp_fuzzing::oracles;
+    use ironrdp_fuzzing::oracles::{self, AcceptorFrameMode};
 
     // A configuration with every option off, two that cover every option between them, and every option on.
-    const CONFIGS: [u8; 4] = [0x00, 0x3b, 0x44, 0xff];
-    // Mode byte of a typed frame that may carry any client PDU, per the input layout.
-    const TYPED_ANY_KIND: u8 = 0b11;
-    // Number of client PDU types a typed frame can carry: chunks starting with each value below it cover every type.
-    const KINDS: u8 = 11;
+    const CONFIGS: [u8; 4] = [0x00, 0xbb, 0x44, 0xff];
 
     for config in CONFIGS {
-        for seed in oracles::acceptor_state_machine_seeds(config) {
+        // The full-replay seed reads no fuzzer input, so only the takeover seeds can carry a typed frame.
+        let seeds = oracles::acceptor_state_machine_seeds(config)
+            .into_iter()
+            .filter(|seed| seed.outcome.takeover.is_some());
+        for seed in seeds {
             let (header, rest) = seed.bytes.split_at(2);
-            for kind in 0..KINDS {
-                let chunk = [kind, 0, 0, 0];
+            // Chunks starting with every byte value cover every client PDU type a typed frame can carry.
+            for first in u8::MIN..=u8::MAX {
+                println!("Check {} with a typed frame starting with {first}", seed.name);
                 let mut input = header.to_vec();
-                input.extend([TYPED_ANY_KIND, 4, 0]);
-                input.extend(chunk);
+                input.extend([
+                    AcceptorFrameMode::TYPED | AcceptorFrameMode::ANY_KIND,
+                    4,
+                    0,
+                    first,
+                    0,
+                    0,
+                    0,
+                ]);
                 input.extend(rest);
-                oracles::acceptor_state_machine(&input);
+                // oracle: mutant typed frame builder that never yields a PDU, so no typed frame reaches the acceptor
+                assert_eq!(
+                    oracles::acceptor_state_machine(&input).typed_frames,
+                    1,
+                    "{} with a typed frame starting with {first}",
+                    seed.name
+                );
             }
         }
+    }
+}
+
+// oracle: spec crates/ironrdp-acceptor/src/connection.rs §set_honor_client_desktop_size (a request is honored only within the [200, 8192] bound, so a width of 199 keeps the server size and one of 200 is adopted, which the oracle's Demand Active check enforces)
+#[test]
+#[expect(
+    clippy::print_stdout,
+    reason = "names the case an assertion inside the oracle fails on, as `check!` does"
+)]
+fn acceptor_state_machine_honors_desktop_sizes_from_the_floor() {
+    use ironrdp_fuzzing::oracles::{self, AcceptorConfig, AcceptorSeed, Takeover};
+
+    let seed = oracles::acceptor_state_machine_seeds(AcceptorConfig::HONOR_DESKTOP_SIZE)
+        .into_iter()
+        .find(|seed| {
+            seed.outcome.takeover
+                == Some(Takeover {
+                    reactivation: false,
+                    state: "BasicSettingsWaitInitial",
+                })
+        })
+        .expect("a seed takes over at the Connect Initial");
+    // The Client Core Data of the Connect Initial is the first place the seed carries the requested size.
+    let requested = AcceptorSeed::CLIENT_DESKTOP_SIZE;
+    let requested = [requested.width.to_le_bytes(), requested.height.to_le_bytes()].concat();
+    let at = seed
+        .bytes
+        .windows(requested.len())
+        .position(|window| window == requested)
+        .expect("the seed carries the requested desktop size");
+
+    for width in [199u16, 200] {
+        println!("Check a requested width of {width}");
+        let mut input = seed.bytes.clone();
+        input[at..at + 2].copy_from_slice(&width.to_le_bytes());
+        assert!(oracles::acceptor_state_machine(&input).accepted, "width {width}");
     }
 }

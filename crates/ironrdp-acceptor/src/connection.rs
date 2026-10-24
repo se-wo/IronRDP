@@ -523,6 +523,7 @@ impl Acceptor {
     /// Rebuilds an accepted acceptor for a [1.3.1.3] Deactivation-Reactivation Sequence.
     ///
     /// The new acceptor re-runs only the capability exchange and the connection finalization.
+    /// The caller sends the Deactivate All PDU that starts the sequence before stepping the new acceptor.
     /// Its Demand Active advertises `desktop_size` and it keeps the MCS channel IDs of `consumed`.
     /// `static_channels` should be the channels taken from the accepted result, which the new result hands back.
     /// Fails when `consumed` never completed the licensing exchange.

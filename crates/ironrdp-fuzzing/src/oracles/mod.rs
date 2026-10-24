@@ -13,7 +13,8 @@
 mod acceptor;
 
 pub use self::acceptor::{
-    AcceptorOutcome, AcceptorSeed, Takeover, acceptor_state_machine, acceptor_state_machine_seeds,
+    AcceptorConfig, AcceptorFrameMode, AcceptorOutcome, AcceptorSeed, Takeover, acceptor_state_machine,
+    acceptor_state_machine_seeds,
 };
 use crate::generators::BitmapInput;
 
