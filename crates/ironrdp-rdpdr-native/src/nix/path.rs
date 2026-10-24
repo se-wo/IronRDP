@@ -104,7 +104,10 @@ impl RelativePath {
         let components = path
             .split('\\')
             .map(|component| {
-                let is_valid = !matches!(component, "" | "." | "..") && !component.contains(['/', '\0']);
+                // [MS-FSCC] 2.1.5.2 limits a component to 255 characters, which also bounds wildcard matching.
+                let is_valid = !matches!(component, "" | "." | "..")
+                    && !component.contains(['/', '\0'])
+                    && component.chars().count() <= 255;
                 is_valid.then(|| component.to_owned()).ok_or(InvalidPath)
             })
             .collect::<Result<_, _>>()?;
@@ -190,6 +193,7 @@ mod tests {
     #[case::forward_slash_root(r"\/etc/passwd")]
     #[case::forward_slash_traversal(r"\dir/../../outside")]
     #[case::embedded_nul("\\embedded\0nul")]
+    #[case::component_over_255_characters(&format!(r"\{}", "a".repeat(256)))]
     fn rejects_traversal_rooted_and_empty_components(#[case] path: &str) {
         assert_eq!(RelativePath::parse(path), Err(InvalidPath));
     }
