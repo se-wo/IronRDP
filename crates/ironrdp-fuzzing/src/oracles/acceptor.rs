@@ -375,8 +375,8 @@ pub fn acceptor_state_machine(data: &[u8]) -> AcceptorOutcome {
 
         // A failing step may still write a PDU telling the client why, such as an RDP Negotiation Failure or a Set
         // Error Info PDU.
-        // The async driver currently drops the output of a failing step, but a driver that sends it must not send a
-        // malformed PDU, so it is checked either way.
+        // A driver that sends the output of a failing step must not send a malformed PDU, so it is checked like any
+        // other.
         let mut written = output.filled();
         while !written.is_empty() {
             // oracle: spec ITU-T T.123 §8 (the TPKT header length covers the whole packet)
