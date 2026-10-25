@@ -18,7 +18,13 @@
 #     3.4. Last resort: add file ignore to `extend-exclude` list.
 
 [files]
-extend-exclude = ["*.bin", "*.bmp", "package-lock.json"]
+extend-exclude = [
+    "*.bin",
+    "*.bmp",
+    "package-lock.json",
+    # German-language review and measurement tooling; typos-cli only knows English words.
+    "analysis/",
+]
 
 [default.extend-words]
 # "look-alikes" is a legitimate hyphenated word
