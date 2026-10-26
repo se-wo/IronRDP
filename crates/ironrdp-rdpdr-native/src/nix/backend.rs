@@ -1220,8 +1220,21 @@ fn open_file(
         warn!(%error, "Open shared directory error");
         NtStatus::UNSUCCESSFUL
     })?;
+    // [MS-SMB2] 2.2.13 SMB2 CREATE Request makes any disposition but the six it lists invalid.
+    if !matches!(
+        req.create_disposition,
+        CreateDisposition::FILE_SUPERSEDE
+            | CreateDisposition::FILE_OPEN
+            | CreateDisposition::FILE_CREATE
+            | CreateDisposition::FILE_OPEN_IF
+            | CreateDisposition::FILE_OVERWRITE
+            | CreateDisposition::FILE_OVERWRITE_IF
+    ) {
+        warn!(disposition = ?req.create_disposition, "Rejected an invalid create disposition");
+        return Err(NtStatus::INVALID_PARAMETER);
+    }
     let is_directory_request = req.create_options.contains(CreateOptions::FILE_DIRECTORY_FILE);
-    // [MS-SMB2] 2.2.13 SMB2 CREATE Request makes a directory request invalid with FILE_NON_DIRECTORY_FILE or a replacing disposition.
+    // It also makes a directory request invalid with FILE_NON_DIRECTORY_FILE or a replacing disposition.
     if is_directory_request
         && (req.create_options.contains(CreateOptions::FILE_NON_DIRECTORY_FILE)
             || !matches!(
@@ -1294,10 +1307,8 @@ fn open_file(
             CreateDisposition::FILE_OPEN => OFlag::O_RDONLY,
             CreateDisposition::FILE_OVERWRITE => OFlag::O_RDWR,
             CreateDisposition::FILE_OVERWRITE_IF => OFlag::O_CREAT | OFlag::O_RDWR,
-            disposition => {
-                warn!(?disposition, "Unsupported create disposition");
-                return Err(NtStatus::UNSUCCESSFUL);
-            }
+            // Refused before the lookup.
+            _ => return Err(NtStatus::INVALID_PARAMETER),
         },
     };
     let file = root

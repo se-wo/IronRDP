@@ -260,6 +260,20 @@ fn reads_longer_than_the_limit_are_rejected(#[case] length: u32, #[case] status:
     CreateDisposition::FILE_OVERWRITE_IF,
     NtStatus::INVALID_PARAMETER
 )]
+// oracle: spec MS-SMB2 §2.2.13
+#[case::invalid_disposition_for_a_missing_name(
+    r"\missing.txt",
+    CreateOptions::empty(),
+    CreateDisposition::from(6),
+    NtStatus::INVALID_PARAMETER
+)]
+// oracle: spec MS-SMB2 §2.2.13
+#[case::invalid_disposition_for_a_directory(
+    r"\dir",
+    CreateOptions::empty(),
+    CreateDisposition::from(6),
+    NtStatus::INVALID_PARAMETER
+)]
 fn create_reports_the_failure_status(
     #[case] path: &str,
     #[case] create_options: CreateOptions,
