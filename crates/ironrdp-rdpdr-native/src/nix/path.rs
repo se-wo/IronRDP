@@ -44,7 +44,9 @@ impl Root {
     /// Refuses a symbolic link and a mount point, so the result stays inside the share.
     /// Without `openat2`, as on macOS and Linux before 5.6, only a mount of another filesystem is refused, not a bind mount within the same one.
     /// Never blocks, so a FIFO in the share cannot stall the client.
+    /// Takes no `O_TRUNC`: without `openat2` it would empty a file on another mount before the device check refuses it, so callers truncate the result instead.
     pub(crate) fn open_at(&self, parent: BorrowedFd<'_>, name: &str, flags: OFlag, mode: Mode) -> nix::Result<OwnedFd> {
+        debug_assert!(!flags.contains(OFlag::O_TRUNC), "callers truncate after the open");
         let flags = flags | OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK | OFlag::O_CLOEXEC;
 
         // `openat2` refuses every mount point, bind mounts included.
@@ -60,13 +62,9 @@ impl Root {
             return nix::fcntl::openat2(parent, name, openat2::how(flags).mode(mode));
         }
 
-        // The device is checked before truncating, so a refused mount is left unchanged.
-        let file = nix::fcntl::openat(parent, name, flags.difference(OFlag::O_TRUNC), mode)?;
+        let file = nix::fcntl::openat(parent, name, flags, mode)?;
         if fstat(file.as_fd())?.st_dev != self.device {
             return Err(Errno::EXDEV);
-        }
-        if flags.contains(OFlag::O_TRUNC) {
-            nix::unistd::ftruncate(file.as_fd(), 0)?;
         }
         Ok(file)
     }
