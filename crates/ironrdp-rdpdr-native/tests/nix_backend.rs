@@ -69,6 +69,68 @@ fn symbolic_links_in_the_share_are_not_followed(
     assert_eq!(std::fs::read(&sentinel).expect("read sentinel"), b"outside");
 }
 
+// oracle: reference crates/ironrdp-rdpdr-native/src/windows/path.rs
+#[rstest]
+#[case::asterisk(r"\a*b")]
+#[case::question_mark(r"\a?b")]
+#[case::colon(r"\a:b")]
+#[case::less_than(r"\a<b")]
+#[case::greater_than(r"\a>b")]
+#[case::pipe(r"\a|b")]
+#[case::quote("\\a\"b")]
+#[case::control_character("\\a\u{1}b")]
+#[case::trailing_dot(r"\name.")]
+#[case::trailing_space(r"\name ")]
+#[case::longer_than_255_units(&format!(r"\{}", "n".repeat(256)))]
+fn names_windows_cannot_hold_are_refused(
+    #[case] path: &str,
+    #[values(CreateOptions::empty(), CreateOptions::FILE_DIRECTORY_FILE)] create_options: CreateOptions,
+) {
+    let fixture = Fixture::new();
+    let mut backend = fixture.backend();
+
+    let response = create_with(
+        &mut backend,
+        DeviceCreateRequest {
+            create_options,
+            ..create_request(path, CreateDisposition::FILE_CREATE)
+        },
+    );
+
+    // oracle: reference crates/ironrdp-rdpdr-native/src/windows/status.rs
+    assert_eq!(response_status(&response), NtStatus::OBJECT_NAME_INVALID);
+    assert_eq!(std::fs::read_dir(&fixture.share).expect("list share").count(), 0);
+}
+
+// oracle: reference crates/ironrdp-rdpdr-native/src/windows/path.rs
+#[test]
+fn rename_refuses_a_name_windows_cannot_hold() {
+    let fixture = Fixture::new();
+    let mut backend = fixture.backend();
+    let file_id = create(&mut backend, r"\file.txt", CreateDisposition::FILE_CREATE);
+
+    let response = set_information(&mut backend, file_id, rename_to(r"\a*b", false));
+
+    assert_eq!(response_status(&response), NtStatus::OBJECT_NAME_INVALID);
+    assert!(fixture.share.join("file.txt").exists());
+}
+
+// oracle: reference crates/ironrdp-rdpdr-native/src/windows/directory.rs
+#[rstest]
+#[case::pipe(r"\a|b")]
+#[case::colon(r"\a:b")]
+#[case::empty_pattern(r"\dir\")]
+fn query_directory_refuses_an_invalid_pattern(#[case] path: &str) {
+    let fixture = Fixture::new();
+    std::fs::create_dir(fixture.share.join("dir")).expect("create directory");
+    let mut backend = fixture.backend();
+    let root_id = create(&mut backend, r"\", CreateDisposition::FILE_OPEN);
+
+    let response = query_directory(&mut backend, root_id, path, true);
+
+    assert_eq!(response_status(&response), NtStatus::OBJECT_NAME_INVALID);
+}
+
 /// Opening a FIFO without a writer must not block, because a blocked open stalls the whole channel.
 // oracle: mutant open without O_NONBLOCK
 #[test]

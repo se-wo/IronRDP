@@ -4,8 +4,8 @@
 //! Each path is split into validated components and opened one component at a time relative to a directory descriptor.
 //! Symbolic links and mount points are refused, so no spelling, link or mount inside the share resolves outside it.
 //!
-//! UNTESTED: every filesystem call on a server-supplied path works on a descriptor from `Root::open_at`
-//! or `RelativePath::open_parent`, never on a joined path string.
+//! UNTESTED: every filesystem call on a server-supplied path works on a descriptor from `Root::open_at`,
+//! `RelativePath::open_parent` or `RelativePath::open_directory`, never on a joined path string.
 //! A path string is resolved again by the kernel, so a symbolic link swapped in after validation would lead outside the share.
 //! A new operation resolves its parent with `open_parent` and opens with `Root::open_at`, or uses an `*at` system call that does not follow the final component.
 //!
@@ -107,9 +107,12 @@ mod openat2 {
     }
 }
 
+/// The longest name Windows accepts, in UTF-16 code units.
+const MAX_NAME_CODE_UNITS: usize = 255;
+
 /// A validated path relative to the shared directory.
 ///
-/// INVARIANT: no component is empty, `.` or `..`, or contains `/` or NUL.
+/// INVARIANT: every component is a name Windows can hold, as [`is_valid_name`] checks, so none is empty, `.` or `..`, or contains `/` or NUL.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RelativePath {
     components: Vec<String>,
@@ -121,7 +124,31 @@ impl RelativePath {
     /// A single leading backslash is the protocol's root-relative spelling and is stripped.
     /// An empty remainder names the shared directory itself.
     pub(crate) fn parse(path: &str) -> Result<Self, InvalidPath> {
+        Self::parse_components(path.strip_prefix('\\').unwrap_or(path))
+    }
+
+    /// Parses a query-directory path into the directory it names and its final component, the pattern to match.
+    ///
+    /// The pattern may hold wildcards, and an empty path enumerates the shared directory.
+    pub(crate) fn parse_query(path: &str) -> Result<(Self, &str), InvalidPath> {
         let path = path.strip_prefix('\\').unwrap_or(path);
+        let (directory, pattern) = if path.is_empty() {
+            ("", "*")
+        } else {
+            path.rsplit_once('\\').unwrap_or(("", path))
+        };
+        let is_valid_pattern = !matches!(pattern, "" | "." | "..")
+            && pattern.encode_utf16().count() <= MAX_NAME_CODE_UNITS
+            && !pattern
+                .chars()
+                .any(|character| character <= '\u{1f}' || matches!(character, ':' | '/' | '"' | '<' | '>' | '|'));
+        if !is_valid_pattern {
+            return Err(InvalidPath);
+        }
+        Ok((Self::parse_components(directory)?, pattern))
+    }
+
+    fn parse_components(path: &str) -> Result<Self, InvalidPath> {
         if path.is_empty() {
             return Ok(Self { components: Vec::new() });
         }
@@ -129,8 +156,9 @@ impl RelativePath {
         let components = path
             .split('\\')
             .map(|component| {
-                let is_valid = !matches!(component, "" | "." | "..") && !component.contains(['/', '\0']);
-                is_valid.then(|| component.to_owned()).ok_or(InvalidPath)
+                is_valid_name(component)
+                    .then(|| component.to_owned())
+                    .ok_or(InvalidPath)
             })
             .collect::<Result<_, _>>()?;
 
@@ -140,11 +168,6 @@ impl RelativePath {
     /// The final component, or `None` for the shared directory itself.
     pub(crate) fn file_name(&self) -> Option<&str> {
         self.components.last().map(String::as_str)
-    }
-
-    /// Whether the final component sits directly in the shared directory, or the path is the shared directory itself.
-    pub(crate) fn is_in_root(&self) -> bool {
-        self.components.len() <= 1
     }
 
     /// Opens the directory that holds the final component, and returns it with that component.
@@ -159,6 +182,11 @@ impl RelativePath {
         Ok((parent, file_name))
     }
 
+    /// Opens this path as a directory.
+    pub(crate) fn open_directory(&self, root: &Root) -> nix::Result<OwnedFd> {
+        open_directories(root, &self.components, None)
+    }
+
     /// Like [`Self::open_parent`], and also returns the status of each directory opened on the way, from the shared directory down to the one returned.
     ///
     /// The shared directory itself lies in no directory, so for it the list is empty.
@@ -171,6 +199,20 @@ impl RelativePath {
         let parent = open_directories(root, parents, Some(&mut ancestors))?;
         Ok((parent, file_name, ancestors))
     }
+}
+
+/// Whether Windows can hold a file named `name` ([MS-FSCC] 2.1.5 Pathname), so the server cannot reach a file it could not have created.
+///
+/// Unlike on Windows, DOS device names such as `CON` are ordinary names here.
+///
+/// [MS-FSCC]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fscc/ffb795f3-027d-4a3c-997d-3085f2332f6f
+fn is_valid_name(name: &str) -> bool {
+    !matches!(name, "" | "." | "..")
+        && name.encode_utf16().count() <= MAX_NAME_CODE_UNITS
+        && !name.ends_with([' ', '.'])
+        && !name.chars().any(|character| {
+            character <= '\u{1f}' || matches!(character, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*')
+        })
 }
 
 /// A path the backend refuses to resolve beneath the shared directory.
@@ -238,5 +280,35 @@ mod tests {
     #[case::trailing_parent(r"\dir\..")]
     fn rejects_traversal_rooted_and_empty_components(#[case] path: &str) {
         assert_eq!(RelativePath::parse(path), Err(InvalidPath));
+    }
+
+    // oracle: reference crates/ironrdp-rdpdr-native/src/windows/directory.rs
+    #[rstest]
+    #[case::wildcard_in_the_share(r"\*", &[], "*")]
+    #[case::empty_path_enumerates_the_share("", &[], "*")]
+    #[case::wildcard_in_a_directory(r"\folder\*", &["folder"], "*")]
+    #[case::single_name(r"\folder\report.txt", &["folder"], "report.txt")]
+    fn splits_query_paths_into_a_directory_and_a_pattern(
+        #[case] path: &str,
+        #[case] directory: &[&str],
+        #[case] pattern: &str,
+    ) {
+        let (parsed, parsed_pattern) = RelativePath::parse_query(path).expect("valid query path");
+
+        assert_eq!(parsed.components, directory);
+        assert_eq!(parsed_pattern, pattern);
+    }
+
+    // oracle: reference crates/ironrdp-rdpdr-native/src/windows/directory.rs
+    #[rstest]
+    #[case::parent_directory(r"\..\*")]
+    #[case::unc_prefix(r"\\server\share")]
+    #[case::forward_slash("outside/anything")]
+    #[case::empty_pattern(r"\folder\")]
+    #[case::dot_pattern(r"\folder\.")]
+    #[case::invalid_pattern_character(r"\a|b")]
+    #[case::invalid_directory_name(r"\a*b\*")]
+    fn rejects_invalid_query_paths(#[case] path: &str) {
+        assert_eq!(RelativePath::parse_query(path), Err(InvalidPath));
     }
 }

@@ -1070,8 +1070,8 @@ pub(crate) fn query_directory(
         Some(open_file) => {
             // An initial query restarts enumeration, so a failed or single-entry query must not resume an earlier listing.
             open_file.listing = None;
-            match RelativePath::parse(&req_inner.path) {
-                Ok(path) => start_query(&backend.file_base, open_file, &path)
+            match RelativePath::parse_query(&req_inner.path) {
+                Ok((directory, pattern)) => start_query(&backend.file_base, open_file, &directory, pattern)
                     .unwrap_or_else(|error| {
                         warn!(%error, "Query directory error");
                         None
@@ -1086,24 +1086,25 @@ pub(crate) fn query_directory(
     };
     return make_query_dir_resp(entry, req_inner.device_io_request, req_inner.file_info_class_lvl);
 
-    /// Returns the first match for `path`, where a final `*` component enumerates the directory that holds it.
+    /// Returns the first match for `pattern` in `directory`, where a `*` pattern enumerates the directory.
     fn start_query(
         file_base: &str,
         open_file: &mut OpenFile,
-        path: &RelativePath,
+        directory: &RelativePath,
+        pattern: &str,
     ) -> nix::Result<Option<DirectoryEntry>> {
         let root = Root::open(file_base)?;
-        let (parent, name) = path.open_parent(&root)?;
-        if name == "*" {
-            let mut listing = DirectoryListing::open(parent, path.is_in_root())?;
+        let opened = directory.open_directory(&root)?;
+        if pattern == "*" {
+            let mut listing = DirectoryListing::open(opened, directory.file_name().is_none())?;
             let entry = listing.next_entry()?;
             open_file.listing = Some(listing);
             return Ok(entry);
         }
 
-        let stat = fstatat(parent.as_fd(), name, AtFlags::AT_SYMLINK_NOFOLLOW)?;
+        let stat = fstatat(opened.as_fd(), pattern, AtFlags::AT_SYMLINK_NOFOLLOW)?;
         Ok(Some(DirectoryEntry {
-            name: path.file_name().unwrap_or_default().to_owned(),
+            name: pattern.to_owned(),
             stat,
         }))
     }
