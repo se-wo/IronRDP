@@ -746,7 +746,7 @@ pub(crate) fn set_information(
             FileInformationClass::Rename(info) => match RelativePath::parse(&info.file_name) {
                 Ok(to) => match rename(
                     &backend.file_base,
-                    &open_file.path,
+                    open_file,
                     &to,
                     info.replace_if_exists == Boolean::True,
                     &backend.pending_deletes,
@@ -812,8 +812,9 @@ pub(crate) fn set_information(
     ))])
 }
 
-/// Renames `from` to `to` ([MS-FSA] 2.1.5.15.12 FileRenameInformation).
+/// Renames the file `open_file` holds to `to` ([MS-FSA] 2.1.5.15.12 FileRenameInformation).
 ///
+/// The handle's path is resolved again, so it fails with STATUS_NO_SUCH_FILE once that name refers to another file than the handle's.
 /// An existing `to` is a collision unless `replace_if_exists` is set, and a directory `to` is never replaced.
 /// A `to` naming the source itself, as a case-only rename on a case-insensitive filesystem does, is not a collision.
 /// The existence check and the rename are separate calls, so a local process creating `to` in between is overwritten.
@@ -822,19 +823,22 @@ pub(crate) fn set_information(
 /// [MS-FSA]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fsa/87f86c9b-6c2a-4803-84b7-131a74a434fa
 fn rename(
     file_base: &str,
-    from: &RelativePath,
+    open_file: &OpenFile,
     to: &RelativePath,
     replace_if_exists: bool,
     pending_deletes: &HashMap<FileIdentity, RelativePath>,
 ) -> Result<(), NtStatus> {
     let root = Root::open(file_base).map_err(status_from_errno)?;
-    let (from_parent, from_name) = from.open_parent(&root).map_err(status_from_parent_errno)?;
+    let (from_parent, from_name) = open_file.path.open_parent(&root).map_err(status_from_parent_errno)?;
     let (to_parent, to_name) = to.open_parent(&root).map_err(status_from_parent_errno)?;
     let to_parent_identity = FileIdentity::of(&fstat(to_parent.as_fd()).map_err(status_from_errno)?);
     if pending_deletes.contains_key(&to_parent_identity) {
         return Err(NtStatus::DELETE_PENDING);
     }
     let source = fstatat(from_parent.as_fd(), from_name, AtFlags::AT_SYMLINK_NOFOLLOW).map_err(status_from_errno)?;
+    if FileIdentity::of(&source) != open_file.identity {
+        return Err(NtStatus::NO_SUCH_FILE);
+    }
     match fstatat(to_parent.as_fd(), to_name, AtFlags::AT_SYMLINK_NOFOLLOW) {
         Ok(target) if FileIdentity::of(&target) == FileIdentity::of(&source) => {}
         Ok(_) if !replace_if_exists => return Err(NtStatus::OBJECT_NAME_COLLISION),
