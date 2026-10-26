@@ -790,14 +790,17 @@ pub(crate) fn set_information(
         }
     };
     // Every handle opened through the renamed link follows it, so a later delete removes this file and not whatever takes the old name.
-    // A handle opened through another hard link of the file keeps that link.
+    // A handle whose path no longer names the file was opened through that link, possibly spelled differently on a case-insensitive filesystem.
+    // A handle opened through another hard link of the file still finds it at its path, and keeps that link.
     if let Some((identity, from, to)) = renamed {
         for open_file in backend
             .open_files
             .values_mut()
-            .filter(|open_file| open_file.identity == identity && open_file.path == from)
+            .filter(|open_file| open_file.identity == identity)
         {
-            open_file.path = to.clone();
+            if open_file.path == from || !names_file(&backend.file_base, &open_file.path, identity) {
+                open_file.path = to.clone();
+            }
         }
     }
     Ok(vec![SvcMessage::from(RdpdrPdu::ClientDriveSetInformationResponse(
@@ -887,6 +890,16 @@ fn status_from_parent_errno(error: Errno) -> NtStatus {
         Errno::ENOENT | Errno::ENOTDIR => NtStatus::OBJECT_PATH_NOT_FOUND,
         error => status_from_errno(error),
     }
+}
+
+/// Whether `path` still names the file `identity`.
+fn names_file(file_base: &str, path: &RelativePath, identity: FileIdentity) -> bool {
+    Root::open(file_base)
+        .and_then(|root| {
+            let (parent, name) = path.open_parent(&root)?;
+            fstatat(parent.as_fd(), name, AtFlags::AT_SYMLINK_NOFOLLOW)
+        })
+        .is_ok_and(|stat| FileIdentity::of(&stat) == identity)
 }
 
 /// Removes the file or empty directory `open_file` names, unless that name now refers to another file.

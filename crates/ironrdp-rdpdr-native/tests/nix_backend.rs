@@ -466,6 +466,30 @@ fn renaming_a_hard_link_does_not_move_handles_opened_through_another_link() {
     );
 }
 
+/// On a case-insensitive filesystem, a handle opened under another spelling of the renamed name follows the rename.
+// oracle: spec MS-FSA §2.1.5.15.3
+#[cfg(target_os = "macos")]
+#[test]
+fn a_handle_opened_under_another_spelling_follows_a_rename() {
+    let fixture = Fixture::new();
+    std::fs::write(fixture.share.join("doc.txt"), b"doc").expect("write file");
+    assert!(
+        fixture.share.join("DOC.TXT").exists(),
+        "the share must be on a case-insensitive filesystem"
+    );
+    let mut backend = fixture.backend();
+    let deleting_id = create(&mut backend, r"\Doc.txt", CreateDisposition::FILE_OPEN);
+    let renaming_id = create(&mut backend, r"\doc.txt", CreateDisposition::FILE_OPEN);
+
+    let response = set_information(&mut backend, renaming_id, rename_to(r"\renamed.txt", false));
+    assert_eq!(response_status(&response), NtStatus::SUCCESS);
+    let _ = set_information(&mut backend, deleting_id, delete_pending(true));
+    close(&mut backend, renaming_id);
+    close(&mut backend, deleting_id);
+
+    assert!(!fixture.share.join("renamed.txt").exists());
+}
+
 // oracle: spec MS-FSA §2.1.5.1
 #[test]
 fn a_file_marked_for_deletion_is_deleted_when_its_last_handle_closes() {
