@@ -42,10 +42,13 @@ pub struct NixRdpdrBackend {
     /// An open file holds up to three descriptors: the file, and a directory being enumerated with its stream.
     /// A quarter of the limit therefore leaves at least a quarter of the descriptors to the rest of the process.
     max_open_files: usize,
-    /// Files to delete when their last open handle closes ([MS-FSA] 2.1.5.5 Server Requests Closing an Open).
+    /// Files to delete when their last open handle closes ([MS-FSA] 2.1.5.5 Server Requests Closing an Open), each with the name it was marked through.
+    ///
+    /// That name is removed rather than the path of whichever handle closes last, so a file with several hard links loses the link the server marked.
+    /// [MS-FSA] marks each link separately, while one name is kept per file here: marking through another link replaces it, and every link of a marked file refuses new opens.
     ///
     /// [MS-FSA]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fsa/d142c93a-72bc-4b05-9d96-8e00371c3308
-    pending_deletes: HashSet<FileIdentity>,
+    pending_deletes: HashMap<FileIdentity, RelativePath>,
     /// Print-job handling for the virtual printer, when one is announced.
     printer: Option<Printer>,
 }
@@ -160,7 +163,7 @@ impl NixRdpdrBackend {
                     MAX_OPEN_FILES
                 }
             },
-            pending_deletes: HashSet::new(),
+            pending_deletes: HashMap::new(),
             printer: None,
         }
     }
@@ -175,8 +178,8 @@ impl NixRdpdrBackend {
             .values()
             .any(|other| other.identity == open_file.identity);
         if !still_open
-            && self.pending_deletes.remove(&open_file.identity)
-            && let Err(error) = remove_file(&self.file_base, &open_file)
+            && let Some(path) = self.pending_deletes.remove(&open_file.identity)
+            && let Err(error) = remove_file(&self.file_base, &path, open_file.identity)
         {
             warn!(%error, "Delete on close error");
         }
@@ -553,7 +556,7 @@ pub(crate) fn query_information(
                         allocation_size: i64::try_from(meta.size()).unwrap(),
                         end_of_file: i64::try_from(meta.size()).unwrap(),
                         number_of_links: u32::try_from(meta.nlink()).unwrap(),
-                        delete_pending: if backend.pending_deletes.contains(identity) {
+                        delete_pending: if backend.pending_deletes.contains_key(identity) {
                             Boolean::True
                         } else {
                             Boolean::False
@@ -730,7 +733,7 @@ pub(crate) fn set_information(
     // [MS-FSA] 2.1.5.15.12 FileRenameInformation refuses to rename a file marked for deletion or a directory holding open files.
     let rename_denied = matches!(req_inner.set_buffer, FileInformationClass::Rename(_))
         && backend.open_files.get(&file_id).is_some_and(|open_file| {
-            backend.pending_deletes.contains(&open_file.identity)
+            backend.pending_deletes.contains_key(&open_file.identity)
                 || backend
                     .open_files
                     .values()
@@ -837,7 +840,7 @@ fn rename(file_base: &str, from: &RelativePath, to: &RelativePath, replace_if_ex
 /// [MS-FSA]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fsa/386d9ec5-e0f6-4853-b175-c05be01419e0
 fn set_delete_pending(
     open_file: &OpenFile,
-    pending_deletes: &mut HashSet<FileIdentity>,
+    pending_deletes: &mut HashMap<FileIdentity, RelativePath>,
     delete_pending: bool,
 ) -> nix::Result<()> {
     if !delete_pending {
@@ -858,7 +861,7 @@ fn set_delete_pending(
             return Err(Errno::ENOTEMPTY);
         }
     }
-    pending_deletes.insert(open_file.identity);
+    pending_deletes.insert(open_file.identity, open_file.path.clone());
     Ok(())
 }
 
@@ -902,12 +905,12 @@ fn names_file(file_base: &str, path: &RelativePath, identity: FileIdentity) -> b
         .is_ok_and(|stat| FileIdentity::of(&stat) == identity)
 }
 
-/// Removes the file or empty directory `open_file` names, unless that name now refers to another file.
-fn remove_file(file_base: &str, open_file: &OpenFile) -> nix::Result<()> {
+/// Removes the file or empty directory `path` names, unless that name now refers to another file than `identity`.
+fn remove_file(file_base: &str, path: &RelativePath, identity: FileIdentity) -> nix::Result<()> {
     let root = Root::open(file_base)?;
-    let (parent, name) = open_file.path.open_parent(&root)?;
+    let (parent, name) = path.open_parent(&root)?;
     let stat = fstatat(parent.as_fd(), name, AtFlags::AT_SYMLINK_NOFOLLOW)?;
-    if FileIdentity::of(&stat) != open_file.identity {
+    if FileIdentity::of(&stat) != identity {
         return Err(Errno::ESTALE);
     }
     let flags = if is_directory(&stat) {
@@ -1132,7 +1135,7 @@ fn open_file(
     file_base: &str,
     req: &DeviceCreateRequest,
     path: &RelativePath,
-    pending_deletes: &HashSet<FileIdentity>,
+    pending_deletes: &HashMap<FileIdentity, RelativePath>,
 ) -> Result<(std::fs::File, FileIdentity), NtStatus> {
     let root = Root::open(file_base).map_err(|error| {
         warn!(%error, "Open shared directory error");
@@ -1158,7 +1161,7 @@ fn open_file(
     // A directory is marked only when empty, and no open can create in it afterwards, so of the directories on a path only the parent can be marked.
     // A local process, or a server rename into the directory, can still add entries to it, and its delete then fails when its last handle closes.
     let parent_identity = FileIdentity::of(&fstat(parent.as_fd()).map_err(status_from_errno)?);
-    if pending_deletes.contains(&parent_identity) {
+    if pending_deletes.contains_key(&parent_identity) {
         return Err(NtStatus::DELETE_PENDING);
     }
 
@@ -1227,7 +1230,7 @@ fn open_file(
     let stat = fstat(file.as_fd()).map_err(status_from_errno)?;
     let identity = FileIdentity::of(&stat);
     // [MS-FSA] 2.1.5.1 Server Requests an Open of a File refuses a file marked for deletion.
-    if pending_deletes.contains(&identity) {
+    if pending_deletes.contains_key(&identity) {
         return Err(NtStatus::DELETE_PENDING);
     }
     // Truncating only once the open can no longer fail keeps a refused file intact, where O_TRUNC would empty it first.

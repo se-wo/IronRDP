@@ -466,6 +466,29 @@ fn renaming_a_hard_link_does_not_move_handles_opened_through_another_link() {
     );
 }
 
+/// The delete removes the hard link it was marked through, whichever handle to the file closes last.
+// oracle: spec MS-FSA §2.1.5.15.3
+#[test]
+fn a_delete_removes_the_hard_link_it_was_marked_through() {
+    let fixture = Fixture::new();
+    std::fs::write(fixture.share.join("a.txt"), b"linked").expect("write file");
+    std::fs::hard_link(fixture.share.join("a.txt"), fixture.share.join("b.txt")).expect("link file");
+    let mut backend = fixture.backend();
+    let a_id = create(&mut backend, r"\a.txt", CreateDisposition::FILE_OPEN);
+    let b_id = create(&mut backend, r"\b.txt", CreateDisposition::FILE_OPEN);
+
+    let response = set_information(&mut backend, b_id, delete_pending(true));
+    close(&mut backend, b_id);
+    close(&mut backend, a_id);
+
+    assert_eq!(response_status(&response), NtStatus::SUCCESS);
+    assert!(!fixture.share.join("b.txt").exists());
+    assert_eq!(
+        std::fs::read(fixture.share.join("a.txt")).expect("read a.txt"),
+        b"linked"
+    );
+}
+
 /// On a case-insensitive filesystem, a handle opened under another spelling of the renamed name follows the rename.
 // oracle: spec MS-FSA §2.1.5.15.3
 #[cfg(target_os = "macos")]
