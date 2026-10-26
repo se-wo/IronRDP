@@ -453,6 +453,32 @@ fn a_file_marked_for_deletion_is_deleted_when_its_last_handle_closes() {
     assert!(!fixture.share.join("shared.txt").exists());
 }
 
+// oracle: spec MS-FSA §2.1.5.1.2
+#[rstest]
+fn overwriting_a_file_marked_for_deletion_keeps_its_contents(
+    #[values(
+        CreateDisposition::FILE_SUPERSEDE,
+        CreateDisposition::FILE_OVERWRITE,
+        CreateDisposition::FILE_OVERWRITE_IF
+    )]
+    disposition: CreateDisposition,
+) {
+    let fixture = Fixture::new();
+    std::fs::write(fixture.share.join("held.txt"), b"held").expect("write file");
+    let mut backend = fixture.backend();
+    let marking_id = create(&mut backend, r"\held.txt", CreateDisposition::FILE_OPEN);
+    let _holding_id = create(&mut backend, r"\held.txt", CreateDisposition::FILE_OPEN);
+    let _ = set_information(&mut backend, marking_id, delete_pending(true));
+
+    let response = create_with(&mut backend, create_request(r"\held.txt", disposition));
+
+    assert_eq!(response_status(&response), NtStatus::DELETE_PENDING);
+    assert_eq!(
+        std::fs::read(fixture.share.join("held.txt")).expect("read file"),
+        b"held"
+    );
+}
+
 // oracle: spec MS-FSA §2.1.5.15.12
 #[test]
 fn a_directory_holding_open_files_cannot_be_renamed() {

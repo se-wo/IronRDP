@@ -1072,14 +1072,8 @@ pub(crate) fn create_drive(
         Err(NtStatus::INSUFFICIENT_RESOURCES)
     } else {
         match RelativePath::parse(&req_inner.path) {
-            Ok(path) => open_file(&backend.file_base, &req_inner, &path).and_then(|file| {
-                let identity = FileIdentity::of(&fstat(file.as_fd()).map_err(status_from_errno)?);
-                // [MS-FSA] 2.1.5.1 Server Requests an Open of a File refuses a file marked for deletion.
-                if backend.pending_deletes.contains(&identity) {
-                    return Err(NtStatus::DELETE_PENDING);
-                }
-                Ok((file, path, identity))
-            }),
+            Ok(path) => open_file(&backend.file_base, &req_inner, &path, &backend.pending_deletes)
+                .map(|(file, identity)| (file, path, identity)),
             Err(InvalidPath) => {
                 warn!(path = ?req_inner.path, "Rejected a create path outside the shared directory");
                 Err(NtStatus::OBJECT_NAME_INVALID)
@@ -1113,8 +1107,15 @@ pub(crate) fn create_drive(
     }
 }
 
-/// Opens or creates `path` beneath the shared directory as `req` asks.
-fn open_file(file_base: &str, req: &DeviceCreateRequest, path: &RelativePath) -> Result<std::fs::File, NtStatus> {
+/// Opens or creates `path` beneath the shared directory as `req` asks, and returns it with its identity.
+///
+/// A file marked for deletion is refused before it is overwritten, so a failed open leaves its contents intact.
+fn open_file(
+    file_base: &str,
+    req: &DeviceCreateRequest,
+    path: &RelativePath,
+    pending_deletes: &HashSet<FileIdentity>,
+) -> Result<(std::fs::File, FileIdentity), NtStatus> {
     let root = Root::open(file_base).map_err(|error| {
         warn!(%error, "Open shared directory error");
         NtStatus::UNSUCCESSFUL
@@ -1182,22 +1183,45 @@ fn open_file(file_base: &str, req: &DeviceCreateRequest, path: &RelativePath) ->
         _ => match req.create_disposition {
             CreateDisposition::FILE_OPEN_IF => OFlag::O_CREAT | OFlag::O_RDWR,
             CreateDisposition::FILE_CREATE => OFlag::O_CREAT | OFlag::O_EXCL | OFlag::O_RDWR,
-            CreateDisposition::FILE_SUPERSEDE => OFlag::O_CREAT | OFlag::O_TRUNC | OFlag::O_RDWR,
+            CreateDisposition::FILE_SUPERSEDE => OFlag::O_CREAT | OFlag::O_RDWR,
             CreateDisposition::FILE_OPEN => OFlag::O_RDONLY,
-            CreateDisposition::FILE_OVERWRITE => OFlag::O_TRUNC | OFlag::O_RDWR,
-            CreateDisposition::FILE_OVERWRITE_IF => OFlag::O_CREAT | OFlag::O_TRUNC | OFlag::O_RDWR,
+            CreateDisposition::FILE_OVERWRITE => OFlag::O_RDWR,
+            CreateDisposition::FILE_OVERWRITE_IF => OFlag::O_CREAT | OFlag::O_RDWR,
             disposition => {
                 warn!(?disposition, "Unsupported create disposition");
                 return Err(NtStatus::UNSUCCESSFUL);
             }
         },
     };
-    root.open_at(parent.as_fd(), name, flags, Mode::from_bits_truncate(0o666))
-        .map(std::fs::File::from)
+    let file = root
+        .open_at(parent.as_fd(), name, flags, Mode::from_bits_truncate(0o666))
         .map_err(|error| {
             warn!(%error, ?name, "Open file error");
             status_from_errno(error)
-        })
+        })?;
+    let stat = fstat(file.as_fd()).map_err(status_from_errno)?;
+    let identity = FileIdentity::of(&stat);
+    // [MS-FSA] 2.1.5.1 Server Requests an Open of a File refuses a file marked for deletion.
+    if pending_deletes.contains(&identity) {
+        return Err(NtStatus::DELETE_PENDING);
+    }
+    // Truncating only once the open can no longer fail keeps a refused file intact, where O_TRUNC would empty it first.
+    // Like O_TRUNC, this leaves anything but a regular file, such as a FIFO, unchanged.
+    let is_regular_file = SFlag::from_bits_truncate(stat.st_mode) & SFlag::S_IFMT == SFlag::S_IFREG;
+    if is_regular_file
+        && matches!(
+            req.create_disposition,
+            CreateDisposition::FILE_SUPERSEDE
+                | CreateDisposition::FILE_OVERWRITE
+                | CreateDisposition::FILE_OVERWRITE_IF
+        )
+    {
+        ftruncate(file.as_fd(), 0).map_err(|error| {
+            warn!(%error, ?name, "Truncate file error");
+            status_from_errno(error)
+        })?;
+    }
+    Ok((std::fs::File::from(file), identity))
 }
 
 pub(crate) fn process_dependent_file(
