@@ -194,6 +194,14 @@ impl NixRdpdrBackend {
         }
     }
 
+    /// Closes every open file as if the server had closed it, so pending deletes run.
+    fn close_all_files(&mut self) {
+        let file_ids = self.open_files.keys().copied().collect::<Vec<_>>();
+        for file_id in file_ids {
+            self.close_file(file_id);
+        }
+    }
+
     /// Accepts print jobs for the virtual printer announced as `device_id` and sends them to
     /// `target`.
     #[must_use]
@@ -203,6 +211,13 @@ impl NixRdpdrBackend {
             spooler: PrinterSpooler::new(target),
         });
         self
+    }
+}
+
+impl Drop for NixRdpdrBackend {
+    /// The session is over, so the handles the server left open are closed and their pending deletes run.
+    fn drop(&mut self) {
+        self.close_all_files();
     }
 }
 
@@ -342,10 +357,7 @@ impl RdpdrBackend for NixRdpdrBackend {
             printer.spooler.reset();
         }
         // The server forgets its handles when the channel restarts, so they are closed as if it had closed them.
-        let file_ids = self.open_files.keys().copied().collect::<Vec<_>>();
-        for file_id in file_ids {
-            self.close_file(file_id);
-        }
+        self.close_all_files();
         Ok(())
     }
     fn handle_server_device_announce_response(&mut self, pdu: ServerDeviceAnnounceResponse) -> PduResult<()> {

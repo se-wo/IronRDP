@@ -610,6 +610,22 @@ fn rename_never_moves_a_file_that_replaced_the_handle_name() {
     assert!(!fixture.share.join("renamed.txt").exists());
 }
 
+/// Dropping the backend closes every handle the server left open, so their pending deletes run.
+// oracle: spec MS-FSA §2.1.5.5
+#[test]
+fn dropping_the_backend_runs_pending_deletes() {
+    let fixture = Fixture::new();
+    std::fs::write(fixture.share.join("doc.txt"), b"doc").expect("write file");
+    let mut backend = fixture.backend();
+    let file_id = create(&mut backend, r"\doc.txt", CreateDisposition::FILE_OPEN);
+    let response = set_information(&mut backend, file_id, delete_pending(true));
+    assert_eq!(response_status(&response), NtStatus::SUCCESS);
+
+    drop(backend);
+
+    assert!(!fixture.share.join("doc.txt").exists());
+}
+
 /// A delete on close never removes a file that took the marked name after the handle was opened.
 // oracle: spec MS-FSA §2.1.5.5
 #[test]
