@@ -148,6 +148,23 @@ fn query_directory_refuses_an_invalid_pattern(#[case] path: &str) {
     assert_eq!(response_status(&response), NtStatus::OBJECT_NAME_INVALID);
 }
 
+/// The DOS wildcards are valid in a pattern, so a pattern without a match reports no match rather than an invalid name.
+// oracle: spec MS-FSA §2.1.5.6.3
+#[rstest]
+#[case::dos_star(r"\<.none")]
+#[case::dos_question_mark(r"\>.none")]
+#[case::dos_dot("\\a\"none")]
+fn a_dos_wildcard_pattern_without_a_match_finds_no_file(#[case] path: &str) {
+    let fixture = Fixture::new();
+    std::fs::write(fixture.share.join("a.txt"), b"a").expect("write file");
+    let mut backend = fixture.backend();
+    let root_id = create(&mut backend, r"\", CreateDisposition::FILE_OPEN);
+
+    let response = query_directory(&mut backend, root_id, path, true);
+
+    assert_eq!(response_status(&response), NtStatus::NO_SUCH_FILE);
+}
+
 /// An initial query that cannot open its directory reports why, rather than an empty match.
 // oracle: reference crates/ironrdp-rdpdr-native/src/windows/directory.rs
 #[test]

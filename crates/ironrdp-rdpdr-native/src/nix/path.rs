@@ -129,7 +129,9 @@ impl RelativePath {
 
     /// Parses a query-directory path into the directory it names and its final component, the pattern to match.
     ///
-    /// The pattern may hold wildcards, and an empty path enumerates the shared directory.
+    /// The pattern may hold the wildcards `*`, `?` and the DOS wildcards `<`, `>` and `"` ([MS-FSA] 2.1.5.6.3 Directory Information Queries), and an empty path enumerates the shared directory.
+    ///
+    /// [MS-FSA]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fsa/fa8194e0-53ec-413b-8315-e8fa85396fd8
     pub(crate) fn parse_query(path: &str) -> Result<(Self, &str), InvalidPath> {
         let path = path.strip_prefix('\\').unwrap_or(path);
         let (directory, pattern) = if path.is_empty() {
@@ -141,7 +143,7 @@ impl RelativePath {
             && pattern.encode_utf16().count() <= MAX_NAME_CODE_UNITS
             && !pattern
                 .chars()
-                .any(|character| character <= '\u{1f}' || matches!(character, ':' | '/' | '"' | '<' | '>' | '|'));
+                .any(|character| character <= '\u{1f}' || matches!(character, ':' | '/' | '|'));
         if !is_valid_pattern {
             return Err(InvalidPath);
         }
