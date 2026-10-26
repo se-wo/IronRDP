@@ -514,7 +514,8 @@ pub(crate) fn read_device(backend: &mut NixRdpdrBackend, req_inner: DeviceReadRe
 }
 
 pub(crate) fn close_device(backend: &mut NixRdpdrBackend, req_inner: DeviceCloseRequest) -> PduResult<Vec<SvcMessage>> {
-    // The handle is closed whether or not a pending delete succeeds, so the close still reports success.
+    // A failed delete on close is only logged, and the close still reports success.
+    // [MS-FSA] 2.1.5.5 Server Requests Closing an Open defines no failure status, and Windows does not report a failed delete on close to the caller closing the handle either.
     backend.close_file(req_inner.device_io_request.file_id);
     let res = RdpdrPdu::DeviceCloseResponse(DeviceCloseResponse {
         device_io_response: DeviceIoResponse::new(req_inner.device_io_request, NtStatus::SUCCESS),
