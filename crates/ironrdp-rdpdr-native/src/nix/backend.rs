@@ -820,7 +820,7 @@ pub(crate) fn set_information(
                 match set_delete_pending(open_file, &mut backend.pending_deletes, info.delete_pending != 0) {
                     Ok(()) => NtStatus::SUCCESS,
                     Err(error) => {
-                        warn!(%error, "Set delete pending error");
+                        trace!(%error, "Set delete pending failed");
                         status_from_errno(error)
                     }
                 }
@@ -1107,7 +1107,7 @@ pub(crate) fn query_directory(
             match RelativePath::parse_query(&req_inner.path) {
                 Ok((directory, pattern)) => start_query(&backend.file_base, open_file, &directory, pattern)
                     .unwrap_or_else(|error| {
-                        warn!(%error, "Query directory error");
+                        trace!(%error, "Initial query directory failed");
                         None
                     })
                     .ok_or(NtStatus::NO_SUCH_FILE),
@@ -1250,7 +1250,7 @@ fn open_file(
         return Err(NtStatus::INVALID_PARAMETER);
     }
     let (parent, name, ancestors) = path.open_parent_with_ancestors(&root).map_err(|error| {
-        warn!(%error, ?path, "Open parent directory error");
+        trace!(%error, ?path, "Open parent directory failed");
         status_from_parent_errno(error)
     })?;
     // [MS-FSA] 2.1.5.1 Server Requests an Open of a File refuses a path through a directory marked for deletion, so nothing is created in it.
@@ -1265,7 +1265,7 @@ fn open_file(
     let flags = match fstatat(parent.as_fd(), name, AtFlags::AT_SYMLINK_NOFOLLOW) {
         Ok(stat) if is_directory(&stat) => {
             if req.create_options.contains(CreateOptions::FILE_NON_DIRECTORY_FILE) {
-                warn!("Attempt to open a directory as a file");
+                trace!("Refused to open a directory as a file");
                 return Err(NtStatus::FILE_IS_A_DIRECTORY);
             }
             // An existing directory cannot be created, overwritten or superseded.
@@ -1273,7 +1273,7 @@ fn open_file(
                 req.create_disposition,
                 CreateDisposition::FILE_OPEN | CreateDisposition::FILE_OPEN_IF
             ) {
-                warn!(disposition = ?req.create_disposition, "Attempt to replace an existing directory");
+                trace!(disposition = ?req.create_disposition, "Refused to replace an existing directory");
                 return Err(if path.file_name().is_none() {
                     NtStatus::ACCESS_DENIED
                 } else {
@@ -1283,7 +1283,7 @@ fn open_file(
             OFlag::O_RDONLY | OFlag::O_DIRECTORY
         }
         Ok(_) if is_directory_request => {
-            warn!("Attempt to open a file as a directory");
+            trace!("Refused to open a file as a directory");
             return Err(if req.create_disposition == CreateDisposition::FILE_CREATE {
                 NtStatus::OBJECT_NAME_COLLISION
             } else {
@@ -1295,13 +1295,13 @@ fn open_file(
                 return Err(NtStatus::NO_SUCH_FILE);
             }
             mkdirat(parent.as_fd(), name, Mode::from_bits_truncate(0o777)).map_err(|error| {
-                warn!(%error, ?path, "Create directory error");
+                trace!(%error, ?path, "Create directory failed");
                 status_from_errno(error)
             })?;
             OFlag::O_RDONLY | OFlag::O_DIRECTORY
         }
         Err(error) if error != Errno::ENOENT => {
-            warn!(%error, ?path, "Look up file error");
+            trace!(%error, ?path, "Look up file failed");
             return Err(status_from_errno(error));
         }
         _ => match req.create_disposition {
@@ -1318,7 +1318,7 @@ fn open_file(
     let file = root
         .open_at(parent.as_fd(), name, flags, Mode::from_bits_truncate(0o666))
         .map_err(|error| {
-            warn!(%error, ?name, "Open file error");
+            trace!(%error, ?name, "Open file failed");
             status_from_errno(error)
         })?;
     let stat = fstat(file.as_fd()).map_err(status_from_errno)?;
