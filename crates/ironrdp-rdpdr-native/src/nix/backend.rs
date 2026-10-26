@@ -816,7 +816,7 @@ pub(crate) fn set_information(
 ///
 /// The handle's path is resolved again, so it fails with STATUS_NO_SUCH_FILE once that name refers to another file than the handle's.
 /// An existing `to` is a collision unless `replace_if_exists` is set, and a directory `to` is never replaced.
-/// A `to` naming the source itself, as a case-only rename on a case-insensitive filesystem does, is not a collision.
+/// A `to` naming the source itself, as a case-only rename on a case-insensitive filesystem does, is not a collision, and a `to` naming another hard link of the source removes the source link.
 /// The existence check and the rename are separate calls, so a local process creating `to` in between is overwritten.
 /// The target directory is opened as a create opens it, so a directory marked for deletion is refused with STATUS_DELETE_PENDING.
 ///
@@ -840,7 +840,16 @@ fn rename(
         return Err(NtStatus::NO_SUCH_FILE);
     }
     match fstatat(to_parent.as_fd(), to_name, AtFlags::AT_SYMLINK_NOFOLLOW) {
-        Ok(target) if FileIdentity::of(&target) == FileIdentity::of(&source) => {}
+        Ok(target) if FileIdentity::of(&target) == open_file.identity => {
+            // `to` is either the source link under another spelling or another hard link of the same file.
+            // POSIX rename leaves two hard links of one file both in place, while [MS-FSA] removes the source link.
+            // On a case-sensitive filesystem, two links whose names differ only in case are taken for one, and both stay.
+            let same_directory =
+                FileIdentity::of(&fstat(from_parent.as_fd()).map_err(status_from_errno)?) == to_parent_identity;
+            if !same_directory || from_name.to_lowercase() != to_name.to_lowercase() {
+                return unlinkat(from_parent.as_fd(), from_name, UnlinkatFlags::NoRemoveDir).map_err(status_from_errno);
+            }
+        }
         Ok(_) if !replace_if_exists => return Err(NtStatus::OBJECT_NAME_COLLISION),
         Ok(target) if is_directory(&target) => return Err(NtStatus::ACCESS_DENIED),
         Ok(_) | Err(Errno::ENOENT) => {}

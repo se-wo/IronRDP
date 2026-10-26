@@ -466,6 +466,26 @@ fn renaming_a_hard_link_does_not_move_handles_opened_through_another_link() {
     );
 }
 
+/// Renaming onto another hard link of the same file removes the source link, where POSIX rename changes nothing.
+// oracle: spec MS-FSA §2.1.5.15.12
+#[test]
+fn rename_onto_another_link_of_the_same_file_removes_the_source() {
+    let fixture = Fixture::new();
+    std::fs::write(fixture.share.join("a.txt"), b"linked").expect("write file");
+    std::fs::hard_link(fixture.share.join("a.txt"), fixture.share.join("b.txt")).expect("link file");
+    let mut backend = fixture.backend();
+    let file_id = create(&mut backend, r"\a.txt", CreateDisposition::FILE_OPEN);
+
+    let response = set_information(&mut backend, file_id, rename_to(r"\b.txt", false));
+
+    assert_eq!(response_status(&response), NtStatus::SUCCESS);
+    assert!(!fixture.share.join("a.txt").exists());
+    assert_eq!(
+        std::fs::read(fixture.share.join("b.txt")).expect("read b.txt"),
+        b"linked"
+    );
+}
+
 /// A rename moves only the file the handle holds, never a file that took its name since it was opened.
 // oracle: spec MS-FSA §2.1.5.15.12
 #[test]
