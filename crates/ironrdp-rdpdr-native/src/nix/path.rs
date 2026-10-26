@@ -203,9 +203,10 @@ impl RelativePath {
     }
 }
 
-/// Whether Windows can hold a file named `name` ([MS-FSCC] 2.1.5 Pathname), so the server cannot reach a file it could not have created.
+/// Whether Windows can create a file named `name`, so the server cannot reach a file it could not have created.
 ///
-/// Unlike on Windows, DOS device names such as `CON` are ordinary names here.
+/// [MS-FSCC] 2.1.5 Pathname forbids the characters and lengths checked here, and a trailing dot or space is refused because Win32 strips it, as the Windows backend does.
+/// Unlike there, `:` never introduces a data stream, which Unix files lack, and DOS device names such as `CON` are ordinary names.
 ///
 /// [MS-FSCC]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fscc/ffb795f3-027d-4a3c-997d-3085f2332f6f
 fn is_valid_name(name: &str) -> bool {

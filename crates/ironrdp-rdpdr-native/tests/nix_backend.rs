@@ -74,6 +74,8 @@ fn symbolic_links_in_the_share_are_not_followed(
 #[rstest]
 #[case::asterisk(r"\a*b")]
 #[case::question_mark(r"\a?b")]
+// Windows takes `a:b` for a data stream, which Unix files lack, so the backend refuses it rather than create a file named so.
+// oracle: mutant colon accepted, creating a file whose name holds the stream
 #[case::colon(r"\a:b")]
 #[case::less_than(r"\a<b")]
 #[case::greater_than(r"\a>b")]
@@ -780,7 +782,7 @@ fn the_shared_directory_cannot_be_marked_for_deletion() {
 }
 
 /// Dropping the backend closes every handle the server left open, so their pending deletes run.
-// oracle: spec MS-FSA §2.1.5.5
+// oracle: reference crates/ironrdp-rdpdr-native/src/windows/handles.rs
 #[test]
 fn dropping_the_backend_runs_pending_deletes() {
     let fixture = Fixture::new();
