@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::os::fd::{AsFd, OwnedFd};
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::fs::MetadataExt;
 
 use ironrdp_core::impl_as_any;
@@ -894,12 +894,17 @@ fn rename(
     }
     match fstatat(to_parent.as_fd(), to_name, AtFlags::AT_SYMLINK_NOFOLLOW) {
         Ok(target) if FileIdentity::of(&target) == open_file.identity => {
-            // `to` is either the source link under another spelling or another hard link of the same file.
+            // `to` is either the source link under another spelling, as a case- or normalization-insensitive filesystem resolves it, or another hard link of the same file.
             // POSIX rename leaves two hard links of one file both in place, while [MS-FSA] removes the source link.
-            // On a case-sensitive filesystem, two links whose names differ only in case are taken for one, and both stay.
+            // A link lives in one directory, so in another directory `to` is another link; in the same one it is only if an entry is stored under exactly that name.
+            // Otherwise the rename goes ahead, which at most changes the spelling of the only link and never removes it.
             let same_directory =
                 FileIdentity::of(&fstat(from_parent.as_fd()).map_err(status_from_errno)?) == to_parent_identity;
-            if !same_directory || from_name.to_lowercase() != to_name.to_lowercase() {
+            let is_another_link = source.st_nlink >= 2
+                && (!same_directory
+                    || from_name != to_name
+                        && contains_entry(to_parent.as_fd(), to_name).map_err(status_from_errno)?);
+            if is_another_link {
                 unlinkat(from_parent.as_fd(), from_name, UnlinkatFlags::NoRemoveDir).map_err(status_from_errno)?;
                 return Ok(to_ancestors);
             }
@@ -915,6 +920,23 @@ fn rename(
     }
     renameat(from_parent.as_fd(), from_name, to_parent.as_fd(), to_name).map_err(status_from_errno)?;
     Ok(to_ancestors)
+}
+
+/// Whether `directory` holds an entry stored under exactly the bytes of `name`, whatever spellings the filesystem treats as equal.
+fn contains_entry(directory: BorrowedFd<'_>, name: &str) -> nix::Result<bool> {
+    // A fresh descriptor reads the directory from its start without moving the caller's read position.
+    let directory = nix::fcntl::openat(
+        directory,
+        ".",
+        OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC,
+        Mode::empty(),
+    )?;
+    for entry in Dir::from_fd(directory)? {
+        if entry?.file_name().to_bytes() == name.as_bytes() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Marks `open_file` for deletion when its last handle closes, or clears the mark.

@@ -612,6 +612,53 @@ fn rename_onto_another_link_of_the_same_file_removes_the_source() {
 }
 
 /// A rename moves only the file the handle holds, never a file that took its name since it was opened.
+/// On a case-sensitive filesystem, a link whose name differs from the source only in case is another link, so the source goes.
+// oracle: spec MS-FSA §2.1.5.15.12
+#[cfg(target_os = "linux")]
+#[test]
+fn rename_onto_a_link_differing_only_in_case_removes_the_source() {
+    let fixture = Fixture::new();
+    std::fs::write(fixture.share.join("a.txt"), b"linked").expect("write file");
+    std::fs::hard_link(fixture.share.join("a.txt"), fixture.share.join("A.txt"))
+        .expect("the share must be on a case-sensitive filesystem");
+    let mut backend = fixture.backend();
+    let file_id = create(&mut backend, r"\a.txt", CreateDisposition::FILE_OPEN);
+
+    let response = set_information(&mut backend, file_id, rename_to(r"\A.txt", false));
+
+    assert_eq!(response_status(&response), NtStatus::SUCCESS);
+    assert!(!fixture.share.join("a.txt").exists());
+    assert_eq!(
+        std::fs::read(fixture.share.join("A.txt")).expect("read A.txt"),
+        b"linked"
+    );
+}
+
+/// On a filesystem that ignores Unicode normalization, another normalization of the source name is the source itself, so the file stays.
+// oracle: spec MS-FSA §2.1.5.15.12
+#[cfg(target_os = "macos")]
+#[test]
+fn rename_to_another_normalization_of_the_name_keeps_the_file() {
+    let decomposed = "cafe\u{301}.txt";
+    let composed = "caf\u{e9}.txt";
+    let fixture = Fixture::new();
+    std::fs::write(fixture.share.join(decomposed), b"coffee").expect("write file");
+    assert!(
+        fixture.share.join(composed).exists(),
+        "the share must be on a normalization-insensitive filesystem"
+    );
+    let mut backend = fixture.backend();
+    let file_id = create(&mut backend, &format!(r"\{decomposed}"), CreateDisposition::FILE_OPEN);
+
+    let response = set_information(&mut backend, file_id, rename_to(&format!(r"\{composed}"), false));
+
+    assert_eq!(response_status(&response), NtStatus::SUCCESS);
+    assert_eq!(
+        std::fs::read(fixture.share.join(composed)).expect("read file"),
+        b"coffee"
+    );
+}
+
 // oracle: spec MS-FSA §2.1.5.15.12
 #[test]
 fn rename_never_moves_a_file_that_replaced_the_handle_name() {
