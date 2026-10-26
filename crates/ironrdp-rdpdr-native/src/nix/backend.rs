@@ -194,6 +194,19 @@ impl NixRdpdrBackend {
         }
     }
 
+    /// Returns an ID no open file holds, counting up and wrapping around after the last one.
+    ///
+    /// At most `max_open_files` files are open, far fewer than there are IDs, so the search ends.
+    fn next_file_id(&mut self) -> u32 {
+        loop {
+            let file_id = self.file_id;
+            self.file_id = self.file_id.wrapping_add(1);
+            if !self.open_files.contains_key(&file_id) {
+                return file_id;
+            }
+        }
+    }
+
     /// Closes every open file as if the server had closed it, so pending deletes run.
     fn close_all_files(&mut self) {
         let file_ids = self.open_files.keys().copied().collect::<Vec<_>>();
@@ -1147,14 +1160,11 @@ fn make_create_drive_resp(
     });
     Ok(vec![SvcMessage::from(res)])
 }
-// in fact, index only needs to be different, so it is ok
-#[expect(clippy::arithmetic_side_effects)]
 pub(crate) fn create_drive(
     backend: &mut NixRdpdrBackend,
     req_inner: DeviceCreateRequest,
 ) -> PduResult<Vec<SvcMessage>> {
-    let file_id = backend.file_id;
-    backend.file_id += 1;
+    let file_id = backend.next_file_id();
 
     let opened = if backend.max_open_files <= backend.open_files.len() {
         warn!("Rejected a create request beyond the open file limit");
@@ -1431,6 +1441,31 @@ mod tests {
         )
         .expect("complete close");
         assert_eq!(open_share(&mut backend).0, NtStatus::SUCCESS);
+    }
+
+    // oracle: reference crates/ironrdp-rdpdr-native/src/windows/file_table.rs
+    #[test]
+    fn a_new_file_never_takes_the_id_of_an_open_one() {
+        let mut backend = NixRdpdrBackend::new(std::env::temp_dir().to_str().expect("UTF-8 path").to_owned());
+        let (status, first) = open_share(&mut backend);
+        assert_eq!(status, NtStatus::SUCCESS);
+        // The counter has come round to an ID that is still open.
+        backend.file_id = first;
+
+        let (status, second) = open_share(&mut backend);
+
+        assert_eq!(status, NtStatus::SUCCESS);
+        assert_ne!(second, first);
+    }
+
+    // oracle: mutant file ID counter overflows instead of wrapping
+    #[test]
+    fn file_ids_wrap_around_after_the_last_one() {
+        let mut backend = NixRdpdrBackend::new(std::env::temp_dir().to_str().expect("UTF-8 path").to_owned());
+        backend.file_id = u32::MAX;
+
+        assert_eq!(open_share(&mut backend), (NtStatus::SUCCESS, u32::MAX));
+        assert_eq!(open_share(&mut backend), (NtStatus::SUCCESS, 0));
     }
 
     // oracle: reference crates/ironrdp-rdpdr-native/src/windows/backend.rs
