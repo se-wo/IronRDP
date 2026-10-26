@@ -4,8 +4,8 @@
 //! Each path is split into validated components and opened one component at a time relative to a directory descriptor.
 //! Symbolic links and mount points are refused, so no spelling, link or mount inside the share resolves outside it.
 //!
-//! UNTESTED: every filesystem call on a server-supplied path works on a descriptor from `Root::open_at`,
-//! `RelativePath::open_parent` or `RelativePath::open_directory`, never on a joined path string.
+//! UNTESTED: every filesystem call on a server-supplied path works on a descriptor from `Root::open_at`
+//! or `RelativePath::open_parent`, never on a joined path string.
 //! A path string is resolved again by the kernel, so a symbolic link swapped in after validation would lead outside the share.
 //! A new operation resolves its parent with `open_parent` and opens with `Root::open_at`, or uses an `*at` system call that does not follow the final component.
 //!
@@ -164,11 +164,6 @@ impl RelativePath {
 
         let parent = open_directories(root, parents)?;
         Ok((parent, file_name))
-    }
-
-    /// Opens this path as a directory.
-    pub(crate) fn open_directory(&self, root: &Root) -> nix::Result<OwnedFd> {
-        open_directories(root, &self.components)
     }
 }
 

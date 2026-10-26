@@ -763,18 +763,15 @@ pub(crate) fn set_information(
             },
             // The allocation size is only a hint, so there is nothing to do.
             FileInformationClass::Allocation(_) => NtStatus::SUCCESS,
-            FileInformationClass::Disposition(info) => match set_delete_pending(
-                &backend.file_base,
-                open_file,
-                &mut backend.pending_deletes,
-                info.delete_pending != 0,
-            ) {
-                Ok(()) => NtStatus::SUCCESS,
-                Err(error) => {
-                    warn!(%error, "Set delete pending error");
-                    status_from_errno(error)
+            FileInformationClass::Disposition(info) => {
+                match set_delete_pending(open_file, &mut backend.pending_deletes, info.delete_pending != 0) {
+                    Ok(()) => NtStatus::SUCCESS,
+                    Err(error) => {
+                        warn!(%error, "Set delete pending error");
+                        status_from_errno(error)
+                    }
                 }
-            },
+            }
             FileInformationClass::EndOfFile(info) => match ftruncate(open_file.file.as_fd(), info.end_of_file) {
                 Ok(()) => NtStatus::SUCCESS,
                 Err(error) => {
@@ -836,7 +833,6 @@ fn rename(file_base: &str, from: &RelativePath, to: &RelativePath, replace_if_ex
 ///
 /// [MS-FSA]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fsa/386d9ec5-e0f6-4853-b175-c05be01419e0
 fn set_delete_pending(
-    file_base: &str,
     open_file: &OpenFile,
     pending_deletes: &mut HashSet<FileIdentity>,
     delete_pending: bool,
@@ -846,8 +842,15 @@ fn set_delete_pending(
         return Ok(());
     }
     if is_directory(&fstat(open_file.file.as_fd())?) {
-        let root = Root::open(file_base)?;
-        let mut listing = DirectoryListing::open(open_file.path.open_directory(&root)?, true)?;
+        // The open directory itself is read, not whatever its path names now.
+        // A duplicate of the handle would share its read position, so a second mark would read on from the end of the first.
+        let directory = nix::fcntl::openat(
+            open_file.file.as_fd(),
+            ".",
+            OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC,
+            Mode::empty(),
+        )?;
+        let mut listing = DirectoryListing::open(directory, true)?;
         if listing.next_entry()?.is_some() {
             return Err(Errno::ENOTEMPTY);
         }

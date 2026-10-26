@@ -600,6 +600,41 @@ fn nothing_can_be_created_in_a_directory_marked_for_deletion(
     assert!(!fixture.share.join("dir").exists());
 }
 
+/// The emptiness check applies to the open directory, not to whatever now holds the name it was opened by.
+// oracle: spec MS-FSA §2.1.5.15.3
+#[test]
+fn marking_a_directory_checks_the_open_directory_after_a_local_rename() {
+    let fixture = Fixture::new();
+    std::fs::create_dir(fixture.share.join("dir")).expect("create directory");
+    let mut backend = fixture.backend();
+    let directory_id = create(&mut backend, r"\dir", CreateDisposition::FILE_OPEN);
+    std::fs::rename(fixture.share.join("dir"), fixture.share.join("moved")).expect("rename directory");
+    std::fs::create_dir(fixture.share.join("dir")).expect("create replacement");
+    std::fs::write(fixture.share.join("dir").join("child.txt"), b"child").expect("write child");
+
+    let response = set_information(&mut backend, directory_id, delete_pending(true));
+
+    assert_eq!(response_status(&response), NtStatus::SUCCESS);
+}
+
+/// Each mark reads the directory from its start, so an earlier mark does not hide entries added since.
+// oracle: spec MS-FSA §2.1.5.15.3
+#[test]
+fn marking_a_directory_again_sees_entries_added_since() {
+    let fixture = Fixture::new();
+    std::fs::create_dir(fixture.share.join("dir")).expect("create directory");
+    let mut backend = fixture.backend();
+    let directory_id = create(&mut backend, r"\dir", CreateDisposition::FILE_OPEN);
+    let first = set_information(&mut backend, directory_id, delete_pending(true));
+    let _ = set_information(&mut backend, directory_id, delete_pending(false));
+    std::fs::write(fixture.share.join("dir").join("child.txt"), b"child").expect("write child");
+
+    let second = set_information(&mut backend, directory_id, delete_pending(true));
+
+    assert_eq!(response_status(&first), NtStatus::SUCCESS);
+    assert_eq!(response_status(&second), NtStatus::DIRECTORY_NOT_EMPTY);
+}
+
 // oracle: spec MS-FSA §2.1.5.15.3
 #[test]
 fn a_directory_that_is_not_empty_cannot_be_marked_for_deletion() {
