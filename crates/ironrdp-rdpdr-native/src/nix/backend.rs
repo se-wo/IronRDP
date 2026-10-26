@@ -747,7 +747,7 @@ pub(crate) fn set_information(
                     info.replace_if_exists == Boolean::True,
                 ) {
                     Ok(()) => {
-                        renamed = Some((open_file.identity, to));
+                        renamed = Some((open_file.identity, open_file.path.clone(), to));
                         NtStatus::SUCCESS
                     }
                     Err(status) => {
@@ -791,12 +791,13 @@ pub(crate) fn set_information(
             NtStatus::NO_SUCH_FILE
         }
     };
-    // Every handle to the renamed file follows it, so a later delete removes this file and not whatever takes the old name.
-    if let Some((identity, to)) = renamed {
+    // Every handle opened through the renamed link follows it, so a later delete removes this file and not whatever takes the old name.
+    // A handle opened through another hard link of the file keeps that link.
+    if let Some((identity, from, to)) = renamed {
         for open_file in backend
             .open_files
             .values_mut()
-            .filter(|open_file| open_file.identity == identity)
+            .filter(|open_file| open_file.identity == identity && open_file.path == from)
         {
             open_file.path = to.clone();
         }

@@ -430,6 +430,30 @@ fn delete_on_close_follows_a_rename_through_another_handle() {
     assert!(!fixture.share.join("backup.tmp").exists());
 }
 
+/// Renaming one hard link leaves a handle opened through another link on that other link.
+// oracle: spec MS-FSA §2.1.5.15.3
+#[test]
+fn renaming_a_hard_link_does_not_move_handles_opened_through_another_link() {
+    let fixture = Fixture::new();
+    std::fs::write(fixture.share.join("a.txt"), b"linked").expect("write file");
+    std::fs::hard_link(fixture.share.join("a.txt"), fixture.share.join("b.txt")).expect("link file");
+    let mut backend = fixture.backend();
+    let a_id = create(&mut backend, r"\a.txt", CreateDisposition::FILE_OPEN);
+    let b_id = create(&mut backend, r"\b.txt", CreateDisposition::FILE_OPEN);
+
+    let response = set_information(&mut backend, a_id, rename_to(r"\c.txt", false));
+    assert_eq!(response_status(&response), NtStatus::SUCCESS);
+    let _ = set_information(&mut backend, b_id, delete_pending(true));
+    close(&mut backend, a_id);
+    close(&mut backend, b_id);
+
+    assert!(!fixture.share.join("b.txt").exists());
+    assert_eq!(
+        std::fs::read(fixture.share.join("c.txt")).expect("read c.txt"),
+        b"linked"
+    );
+}
+
 // oracle: spec MS-FSA §2.1.5.1
 #[test]
 fn a_file_marked_for_deletion_is_deleted_when_its_last_handle_closes() {
