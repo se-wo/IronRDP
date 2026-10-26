@@ -466,6 +466,26 @@ fn renaming_a_hard_link_does_not_move_handles_opened_through_another_link() {
     );
 }
 
+/// A delete on close never removes a file that took the marked name after the handle was opened.
+// oracle: spec MS-FSA §2.1.5.5
+#[test]
+fn a_delete_on_close_keeps_a_file_that_replaced_the_marked_name() {
+    let fixture = Fixture::new();
+    std::fs::write(fixture.share.join("doc.txt"), b"original").expect("write file");
+    let mut backend = fixture.backend();
+    let file_id = create(&mut backend, r"\doc.txt", CreateDisposition::FILE_OPEN);
+    std::fs::rename(fixture.share.join("doc.txt"), fixture.share.join("moved.txt")).expect("rename locally");
+    std::fs::write(fixture.share.join("doc.txt"), b"replacement").expect("write replacement");
+
+    let _ = set_information(&mut backend, file_id, delete_pending(true));
+    close(&mut backend, file_id);
+
+    assert_eq!(
+        std::fs::read(fixture.share.join("doc.txt")).expect("read replacement"),
+        b"replacement"
+    );
+}
+
 /// The delete removes the hard link it was marked through, whichever handle to the file closes last.
 // oracle: spec MS-FSA §2.1.5.15.3
 #[test]
