@@ -659,6 +659,26 @@ fn nothing_can_be_created_in_a_directory_marked_for_deletion(
     assert!(!fixture.share.join("dir").exists());
 }
 
+/// A rename opens its target directory like a create does, so it cannot move a file into a directory marked for deletion.
+// oracle: spec MS-FSA §2.1.5.15.12
+#[test]
+fn nothing_can_be_renamed_into_a_directory_marked_for_deletion() {
+    let fixture = Fixture::new();
+    std::fs::create_dir(fixture.share.join("dir")).expect("create directory");
+    std::fs::write(fixture.share.join("file.txt"), b"file").expect("write file");
+    let mut backend = fixture.backend();
+    let directory_id = create(&mut backend, r"\dir", CreateDisposition::FILE_OPEN);
+    let _ = set_information(&mut backend, directory_id, delete_pending(true));
+    let file_id = create(&mut backend, r"\file.txt", CreateDisposition::FILE_OPEN);
+
+    let response = set_information(&mut backend, file_id, rename_to(r"\dir\file.txt", false));
+    close(&mut backend, directory_id);
+
+    assert_eq!(response_status(&response), NtStatus::DELETE_PENDING);
+    assert!(fixture.share.join("file.txt").exists());
+    assert!(!fixture.share.join("dir").exists());
+}
+
 /// The emptiness check applies to the open directory, not to whatever now holds the name it was opened by.
 // oracle: spec MS-FSA §2.1.5.15.3
 #[test]

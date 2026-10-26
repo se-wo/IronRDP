@@ -749,6 +749,7 @@ pub(crate) fn set_information(
                     &open_file.path,
                     &to,
                     info.replace_if_exists == Boolean::True,
+                    &backend.pending_deletes,
                 ) {
                     Ok(()) => {
                         renamed = Some((open_file.identity, open_file.path.clone(), to));
@@ -816,12 +817,23 @@ pub(crate) fn set_information(
 /// An existing `to` is a collision unless `replace_if_exists` is set, and a directory `to` is never replaced.
 /// A `to` naming the source itself, as a case-only rename on a case-insensitive filesystem does, is not a collision.
 /// The existence check and the rename are separate calls, so a local process creating `to` in between is overwritten.
+/// The target directory is opened as a create opens it, so a directory marked for deletion is refused with STATUS_DELETE_PENDING.
 ///
 /// [MS-FSA]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fsa/87f86c9b-6c2a-4803-84b7-131a74a434fa
-fn rename(file_base: &str, from: &RelativePath, to: &RelativePath, replace_if_exists: bool) -> Result<(), NtStatus> {
+fn rename(
+    file_base: &str,
+    from: &RelativePath,
+    to: &RelativePath,
+    replace_if_exists: bool,
+    pending_deletes: &HashMap<FileIdentity, RelativePath>,
+) -> Result<(), NtStatus> {
     let root = Root::open(file_base).map_err(status_from_errno)?;
     let (from_parent, from_name) = from.open_parent(&root).map_err(status_from_parent_errno)?;
     let (to_parent, to_name) = to.open_parent(&root).map_err(status_from_parent_errno)?;
+    let to_parent_identity = FileIdentity::of(&fstat(to_parent.as_fd()).map_err(status_from_errno)?);
+    if pending_deletes.contains_key(&to_parent_identity) {
+        return Err(NtStatus::DELETE_PENDING);
+    }
     let source = fstatat(from_parent.as_fd(), from_name, AtFlags::AT_SYMLINK_NOFOLLOW).map_err(status_from_errno)?;
     match fstatat(to_parent.as_fd(), to_name, AtFlags::AT_SYMLINK_NOFOLLOW) {
         Ok(target) if FileIdentity::of(&target) == FileIdentity::of(&source) => {}
@@ -1159,7 +1171,7 @@ fn open_file(
     })?;
     // [MS-FSA] 2.1.5.1 Server Requests an Open of a File refuses a path through a directory marked for deletion, so nothing is created in it.
     // A directory is marked only when empty, and no open can create in it afterwards, so of the directories on a path only the parent can be marked.
-    // A local process, or a server rename into the directory, can still add entries to it, and its delete then fails when its last handle closes.
+    // A local process can still add entries to it, and its delete then fails when its last handle closes.
     let parent_identity = FileIdentity::of(&fstat(parent.as_fd()).map_err(status_from_errno)?);
     if pending_deletes.contains_key(&parent_identity) {
         return Err(NtStatus::DELETE_PENDING);
