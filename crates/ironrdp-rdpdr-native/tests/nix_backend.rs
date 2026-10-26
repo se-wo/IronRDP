@@ -574,6 +574,32 @@ fn an_empty_directory_opened_with_open_if_is_deleted_on_close() {
     assert!(!fixture.share.join("empty").exists());
 }
 
+// oracle: spec MS-FSA §2.1.5.1
+#[rstest]
+fn nothing_can_be_created_in_a_directory_marked_for_deletion(
+    #[values(CreateOptions::empty(), CreateOptions::FILE_DIRECTORY_FILE)] create_options: CreateOptions,
+) {
+    let fixture = Fixture::new();
+    std::fs::create_dir(fixture.share.join("dir")).expect("create directory");
+    let mut backend = fixture.backend();
+    let directory_id = create(&mut backend, r"\dir", CreateDisposition::FILE_OPEN);
+    let _ = set_information(&mut backend, directory_id, delete_pending(true));
+
+    let response = create_with(
+        &mut backend,
+        DeviceCreateRequest {
+            create_options,
+            ..create_request(r"\dir\x", CreateDisposition::FILE_CREATE)
+        },
+    );
+    let created = fixture.share.join("dir").join("x").exists();
+    close(&mut backend, directory_id);
+
+    assert_eq!(response_status(&response), NtStatus::DELETE_PENDING);
+    assert!(!created);
+    assert!(!fixture.share.join("dir").exists());
+}
+
 // oracle: spec MS-FSA §2.1.5.15.3
 #[test]
 fn a_directory_that_is_not_empty_cannot_be_marked_for_deletion() {

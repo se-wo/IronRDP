@@ -1137,6 +1137,13 @@ fn open_file(
         warn!(%error, ?path, "Open parent directory error");
         status_from_parent_errno(error)
     })?;
+    // [MS-FSA] 2.1.5.1 Server Requests an Open of a File refuses a path through a directory marked for deletion, so nothing is created in it.
+    // A directory is marked only when empty, and no open can create in it afterwards, so of the directories on a path only the parent can be marked.
+    // A local process, or a server rename into the directory, can still add entries to it, and its delete then fails when its last handle closes.
+    let parent_identity = FileIdentity::of(&fstat(parent.as_fd()).map_err(status_from_errno)?);
+    if pending_deletes.contains(&parent_identity) {
+        return Err(NtStatus::DELETE_PENDING);
+    }
 
     // Statuses follow [MS-FSA] 2.1.5.1 Server Requests an Open of a File and 2.1.5.1.2 Open of an Existing File.
     let flags = match fstatat(parent.as_fd(), name, AtFlags::AT_SYMLINK_NOFOLLOW) {
