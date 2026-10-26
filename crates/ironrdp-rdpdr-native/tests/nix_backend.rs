@@ -220,9 +220,9 @@ fn create_reports_the_failure_status(
     assert_eq!(response_status(&response), status);
 }
 
-/// Each operation that resolves a server-supplied path works on paths inside the share.
+/// Each operation that resolves a server-supplied path works on paths inside a subdirectory of the share.
 #[test]
-fn file_lifecycle_inside_the_share() {
+fn file_lifecycle_inside_a_subdirectory() {
     let fixture = Fixture::new();
     std::fs::create_dir(fixture.share.join("docs")).expect("create subdirectory");
     let mut backend = fixture.backend();
@@ -261,14 +261,24 @@ fn file_lifecycle_inside_the_share() {
     assert_eq!(response_status(&response), NtStatus::SUCCESS);
     close(&mut backend, file_id);
     assert!(!renamed.exists());
+}
 
-    std::fs::write(fixture.share.join("docs").join("a.txt"), b"a").expect("write a.txt");
+// oracle: spec MS-FSA §2.1.5.6.3
+#[test]
+fn a_subdirectory_lists_dot_entries_first() {
+    let fixture = Fixture::new();
+    std::fs::create_dir(fixture.share.join("docs")).expect("create subdirectory");
+    std::fs::write(fixture.share.join("docs").join("a.txt"), b"a").expect("write file");
+    let mut backend = fixture.backend();
     let docs_id = create(&mut backend, r"\docs", CreateDisposition::FILE_OPEN);
-    // oracle: spec MS-FSA §2.1.5.6.3
-    let (names, end) = list_directory(&mut backend, docs_id, r"\docs\*");
-    assert_eq!(names[..2], [".", ".."]);
-    assert_eq!(sorted(&names[2..]), ["a.txt", "new"]);
-    assert_eq!(end, NtStatus::NO_MORE_FILES);
+
+    assert_eq!(
+        list_directory(&mut backend, docs_id, r"\docs\*"),
+        (
+            vec![".".to_owned(), "..".to_owned(), "a.txt".to_owned()],
+            NtStatus::NO_MORE_FILES
+        )
+    );
 }
 
 // oracle: spec MS-FSA §2.1.5.6.3
@@ -285,7 +295,9 @@ fn the_shared_directory_lists_no_dot_entries() {
     );
 }
 
-// oracle: spec MS-FSA §2.1.5.6.3
+// oracle: mutant a rejected initial query lets a continuation resume the earlier listing
+// No specification decides this: MS-FSA §2.1.5.6.3 fails an invalid pattern before it resets the enumeration position,
+// and the rejected path, which leaves the share, is a client policy rather than a pattern MS-FSA describes.
 #[test]
 fn a_failed_initial_query_restarts_enumeration() {
     let fixture = Fixture::new();
@@ -677,12 +689,6 @@ fn list_directory(backend: &mut NixRdpdrBackend, file_id: u32, pattern: &str) ->
         response = query_directory(backend, file_id, "", false);
     }
     (names, response_status(&response))
-}
-
-fn sorted(names: &[String]) -> Vec<&str> {
-    let mut names: Vec<_> = names.iter().map(String::as_str).collect();
-    names.sort_unstable();
-    names
 }
 
 fn create_with(backend: &mut NixRdpdrBackend, request: DeviceCreateRequest) -> Vec<SvcMessage> {
