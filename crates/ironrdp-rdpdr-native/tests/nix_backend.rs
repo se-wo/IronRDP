@@ -726,6 +726,24 @@ fn a_link_marked_for_deletion_is_not_counted() {
     assert_eq!(information.delete_pending, Boolean::True);
 }
 
+/// A directory has one link, however many entries Unix counts for `.` and subdirectories.
+// oracle: spec MS-FSA §2.1.5.12.27
+#[rstest]
+#[case::unmarked(false, 1)]
+#[case::marked_for_deletion(true, 0)]
+fn a_directory_counts_one_link(#[case] marked: bool, #[case] links: u32) {
+    let fixture = Fixture::new();
+    std::fs::create_dir(fixture.share.join("dir")).expect("create directory");
+    let mut backend = fixture.backend();
+    let directory_id = create(&mut backend, r"\dir", CreateDisposition::FILE_OPEN);
+    let _ = set_information(&mut backend, directory_id, delete_pending(marked));
+
+    assert_eq!(
+        query_standard_information(&mut backend, directory_id).number_of_links,
+        links
+    );
+}
+
 /// Dropping the backend closes every handle the server left open, so their pending deletes run.
 // oracle: spec MS-FSA §2.1.5.5
 #[test]

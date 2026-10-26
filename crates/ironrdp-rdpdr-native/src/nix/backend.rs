@@ -590,10 +590,13 @@ pub(crate) fn query_information(
                     let standard_info = FileStandardInformation {
                         allocation_size: i64::try_from(meta.size()).unwrap(),
                         end_of_file: i64::try_from(meta.size()).unwrap(),
-                        // The link marked for deletion is not counted ([MS-FSA] 2.1.5.12.27 FileStandardInformation).
-                        number_of_links: u32::try_from(meta.nlink())
-                            .unwrap()
-                            .saturating_sub(u32::from(is_delete_pending)),
+                        // A directory has one link, whatever Unix counts for `.` and subdirectories, and the link marked for deletion is not counted ([MS-FSA] 2.1.5.12.27 FileStandardInformation).
+                        number_of_links: if meta.is_dir() {
+                            1
+                        } else {
+                            u32::try_from(meta.nlink()).unwrap()
+                        }
+                        .saturating_sub(u32::from(is_delete_pending)),
                         delete_pending: if is_delete_pending {
                             Boolean::True
                         } else {
