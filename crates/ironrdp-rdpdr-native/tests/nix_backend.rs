@@ -985,6 +985,26 @@ fn nothing_can_be_created_in_a_directory_marked_for_deletion(
     assert!(!fixture.share.join("dir").exists());
 }
 
+/// Every directory on the path counts, so a subdirectory a local process created in a marked directory gains nothing either.
+// oracle: spec MS-FSA §2.1.5.1
+#[test]
+fn nothing_can_be_created_below_a_directory_marked_for_deletion() {
+    let fixture = Fixture::new();
+    std::fs::create_dir(fixture.share.join("dir")).expect("create directory");
+    let mut backend = fixture.backend();
+    let directory_id = create(&mut backend, r"\dir", CreateDisposition::FILE_OPEN);
+    let _ = set_information(&mut backend, directory_id, delete_pending(true));
+    std::fs::create_dir(fixture.share.join("dir").join("sub")).expect("create subdirectory locally");
+
+    let response = create_with(
+        &mut backend,
+        create_request(r"\dir\sub\x.txt", CreateDisposition::FILE_CREATE),
+    );
+
+    assert_eq!(response_status(&response), NtStatus::DELETE_PENDING);
+    assert!(!fixture.share.join("dir").join("sub").join("x.txt").exists());
+}
+
 /// A rename opens its target directory like a create does, so it cannot move a file into a directory marked for deletion.
 // The target directory is the last component of that open, which MS-FSA §2.1.5.1 does not refuse, but Windows does.
 // oracle: reference crates/ironrdp-rdpdr-native/src/windows/file.rs
