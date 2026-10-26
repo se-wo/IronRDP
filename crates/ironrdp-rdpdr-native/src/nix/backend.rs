@@ -816,7 +816,7 @@ pub(crate) fn set_information(
                     }
                 },
                 Err(InvalidPath) => {
-                    warn!(file_name = ?info.file_name, "Rejected a rename target outside the shared directory");
+                    trace!(file_name = ?info.file_name, "Rejected an invalid rename target");
                     NtStatus::OBJECT_NAME_INVALID
                 }
             },
@@ -1149,7 +1149,7 @@ pub(crate) fn query_directory(
                     }
                 },
                 Err(InvalidPath) => {
-                    warn!(path = ?req_inner.path, "Rejected a query path outside the shared directory");
+                    trace!(path = ?req_inner.path, "Rejected an invalid query path");
                     Err(NtStatus::OBJECT_NAME_INVALID)
                 }
             }
@@ -1215,7 +1215,7 @@ pub(crate) fn create_drive(
             Ok(path) => open_file(&backend.file_base, &req_inner, &path, &backend.pending_deletes)
                 .map(|(file, identity, ancestors)| (file, path, identity, ancestors)),
             Err(InvalidPath) => {
-                warn!(path = ?req_inner.path, "Rejected a create path outside the shared directory");
+                trace!(path = ?req_inner.path, "Rejected an invalid create path");
                 Err(NtStatus::OBJECT_NAME_INVALID)
             }
         }
