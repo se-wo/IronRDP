@@ -116,6 +116,22 @@ fn rename_refuses_a_name_windows_cannot_hold() {
     assert!(fixture.share.join("file.txt").exists());
 }
 
+// oracle: reference crates/ironrdp-rdpdr-native/src/windows/file.rs
+#[rstest]
+fn rename_refuses_a_target_without_a_name(
+    #[values("", r"\")] file_name: &str,
+    #[values(false, true)] replace_if_exists: bool,
+) {
+    let fixture = Fixture::new();
+    let mut backend = fixture.backend();
+    let file_id = create(&mut backend, r"\file.txt", CreateDisposition::FILE_CREATE);
+
+    let response = set_information(&mut backend, file_id, rename_to(file_name, replace_if_exists));
+
+    assert_eq!(response_status(&response), NtStatus::OBJECT_NAME_INVALID);
+    assert!(fixture.share.join("file.txt").exists());
+}
+
 // oracle: reference crates/ironrdp-rdpdr-native/src/windows/directory.rs
 #[rstest]
 #[case::pipe(r"\a|b")]

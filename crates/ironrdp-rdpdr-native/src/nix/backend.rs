@@ -791,7 +791,10 @@ pub(crate) fn set_information(
     let status = match backend.open_files.get_mut(&file_id) {
         Some(open_file) => match &req_inner.set_buffer {
             FileInformationClass::Rename(_) if rename_denied => NtStatus::ACCESS_DENIED,
-            FileInformationClass::Rename(info) => match RelativePath::parse(&info.file_name) {
+            // The shared directory itself is no name to rename to.
+            FileInformationClass::Rename(info) => match RelativePath::parse(&info.file_name)
+                .and_then(|to| to.file_name().is_some().then_some(to).ok_or(InvalidPath))
+            {
                 Ok(to) => match rename(
                     &backend.file_base,
                     open_file,
