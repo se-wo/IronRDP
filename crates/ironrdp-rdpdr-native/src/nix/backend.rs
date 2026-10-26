@@ -64,6 +64,10 @@ struct OpenFile {
     file: std::fs::File,
     path: RelativePath,
     identity: FileIdentity,
+    /// The directories from the shared directory down to the one holding this file, as the server last reached it.
+    ///
+    /// A directory holding open files is found by these rather than by path, so another spelling of a name or a local rename does not hide one.
+    ancestors: Vec<FileIdentity>,
     /// The enumeration the last initial query-directory request started on this file.
     listing: Option<DirectoryListing>,
 }
@@ -737,7 +741,7 @@ pub(crate) fn set_information(
                 || backend
                     .open_files
                     .values()
-                    .any(|other| other.path.is_inside(&open_file.path))
+                    .any(|other| other.ancestors.contains(&open_file.identity))
         });
     // A rename target that is open cannot be replaced, so the open files are collected before one of them is borrowed mutably.
     let open_identities = if matches!(req_inner.set_buffer, FileInformationClass::Rename(_)) {
@@ -762,8 +766,8 @@ pub(crate) fn set_information(
                     &backend.pending_deletes,
                     &open_identities,
                 ) {
-                    Ok(()) => {
-                        renamed = Some((open_file.identity, open_file.path.clone(), to));
+                    Ok(ancestors) => {
+                        renamed = Some((open_file.identity, open_file.path.clone(), to, ancestors));
                         NtStatus::SUCCESS
                     }
                     Err(status) => {
@@ -807,7 +811,7 @@ pub(crate) fn set_information(
     // Every handle opened through the renamed link follows it, so a later delete removes this file and not whatever takes the old name.
     // A handle whose path no longer names the file was opened through that link, possibly spelled differently on a case-insensitive filesystem.
     // A handle opened through another hard link of the file still finds it at its path, and keeps that link.
-    if let Some((identity, from, to)) = renamed {
+    if let Some((identity, from, to, ancestors)) = renamed {
         for open_file in backend
             .open_files
             .values_mut()
@@ -815,6 +819,7 @@ pub(crate) fn set_information(
         {
             if open_file.path == from || !names_file(&backend.file_base, &open_file.path, identity) {
                 open_file.path = to.clone();
+                open_file.ancestors = ancestors.clone();
             }
         }
     }
@@ -823,7 +828,7 @@ pub(crate) fn set_information(
     ))])
 }
 
-/// Renames the file `open_file` holds to `to` ([MS-FSA] 2.1.5.15.12 FileRenameInformation).
+/// Renames the file `open_file` holds to `to` ([MS-FSA] 2.1.5.15.12 FileRenameInformation), and returns the directories leading to `to`.
 ///
 /// The handle's path is resolved again, so it fails with STATUS_NO_SUCH_FILE once that name refers to another file than the handle's.
 /// An existing `to` is a collision unless `replace_if_exists` is set.
@@ -840,10 +845,11 @@ fn rename(
     replace_if_exists: bool,
     pending_deletes: &HashMap<FileIdentity, RelativePath>,
     open_identities: &HashSet<FileIdentity>,
-) -> Result<(), NtStatus> {
+) -> Result<Vec<FileIdentity>, NtStatus> {
     let root = Root::open(file_base).map_err(status_from_errno)?;
     let (from_parent, from_name) = open_file.path.open_parent(&root).map_err(status_from_parent_errno)?;
-    let (to_parent, to_name) = to.open_parent(&root).map_err(status_from_parent_errno)?;
+    let (to_parent, to_name, to_ancestors) = to.open_parent_with_ancestors(&root).map_err(status_from_parent_errno)?;
+    let to_ancestors = to_ancestors.iter().map(FileIdentity::of).collect::<Vec<_>>();
     let to_parent_identity = FileIdentity::of(&fstat(to_parent.as_fd()).map_err(status_from_errno)?);
     if pending_deletes.contains_key(&to_parent_identity) {
         return Err(NtStatus::DELETE_PENDING);
@@ -860,7 +866,8 @@ fn rename(
             let same_directory =
                 FileIdentity::of(&fstat(from_parent.as_fd()).map_err(status_from_errno)?) == to_parent_identity;
             if !same_directory || from_name.to_lowercase() != to_name.to_lowercase() {
-                return unlinkat(from_parent.as_fd(), from_name, UnlinkatFlags::NoRemoveDir).map_err(status_from_errno);
+                unlinkat(from_parent.as_fd(), from_name, UnlinkatFlags::NoRemoveDir).map_err(status_from_errno)?;
+                return Ok(to_ancestors);
             }
         }
         Ok(_) if !replace_if_exists => return Err(NtStatus::OBJECT_NAME_COLLISION),
@@ -872,7 +879,8 @@ fn rename(
         Ok(_) | Err(Errno::ENOENT) => {}
         Err(error) => return Err(status_from_errno(error)),
     }
-    renameat(from_parent.as_fd(), from_name, to_parent.as_fd(), to_name).map_err(status_from_errno)
+    renameat(from_parent.as_fd(), from_name, to_parent.as_fd(), to_name).map_err(status_from_errno)?;
+    Ok(to_ancestors)
 }
 
 /// Marks `open_file` for deletion when its last handle closes, or clears the mark.
@@ -1136,7 +1144,7 @@ pub(crate) fn create_drive(
     } else {
         match RelativePath::parse(&req_inner.path) {
             Ok(path) => open_file(&backend.file_base, &req_inner, &path, &backend.pending_deletes)
-                .map(|(file, identity)| (file, path, identity)),
+                .map(|(file, identity, ancestors)| (file, path, identity, ancestors)),
             Err(InvalidPath) => {
                 warn!(path = ?req_inner.path, "Rejected a create path outside the shared directory");
                 Err(NtStatus::OBJECT_NAME_INVALID)
@@ -1145,7 +1153,7 @@ pub(crate) fn create_drive(
     };
 
     match opened {
-        Ok((file, path, identity)) => {
+        Ok((file, path, identity, ancestors)) => {
             trace!(file_id, ?path, "Opened drive file");
             backend.open_files.insert(
                 file_id,
@@ -1153,6 +1161,7 @@ pub(crate) fn create_drive(
                     file,
                     path,
                     identity,
+                    ancestors,
                     listing: None,
                 },
             );
@@ -1170,7 +1179,7 @@ pub(crate) fn create_drive(
     }
 }
 
-/// Opens or creates `path` beneath the shared directory as `req` asks, and returns it with its identity.
+/// Opens or creates `path` beneath the shared directory as `req` asks, and returns it with its identity and the directories leading to it.
 ///
 /// A file marked for deletion is refused before it is overwritten, so a failed open leaves its contents intact.
 fn open_file(
@@ -1178,7 +1187,7 @@ fn open_file(
     req: &DeviceCreateRequest,
     path: &RelativePath,
     pending_deletes: &HashMap<FileIdentity, RelativePath>,
-) -> Result<(std::fs::File, FileIdentity), NtStatus> {
+) -> Result<(std::fs::File, FileIdentity, Vec<FileIdentity>), NtStatus> {
     let root = Root::open(file_base).map_err(|error| {
         warn!(%error, "Open shared directory error");
         NtStatus::UNSUCCESSFUL
@@ -1195,7 +1204,7 @@ fn open_file(
         warn!(disposition = ?req.create_disposition, "Rejected an invalid directory create request");
         return Err(NtStatus::INVALID_PARAMETER);
     }
-    let (parent, name) = path.open_parent(&root).map_err(|error| {
+    let (parent, name, ancestors) = path.open_parent_with_ancestors(&root).map_err(|error| {
         warn!(%error, ?path, "Open parent directory error");
         status_from_parent_errno(error)
     })?;
@@ -1291,7 +1300,11 @@ fn open_file(
             status_from_errno(error)
         })?;
     }
-    Ok((std::fs::File::from(file), identity))
+    Ok((
+        std::fs::File::from(file),
+        identity,
+        ancestors.iter().map(FileIdentity::of).collect(),
+    ))
 }
 
 pub(crate) fn process_dependent_file(

@@ -16,7 +16,7 @@ use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 
 use nix::errno::Errno;
 use nix::fcntl::OFlag;
-use nix::sys::stat::{Mode, dev_t, fstat};
+use nix::sys::stat::{FileStat, Mode, dev_t, fstat};
 
 /// Flags for every directory descriptor taken while walking a path.
 const DIRECTORY_FLAGS: OFlag = OFlag::O_RDONLY.union(OFlag::O_DIRECTORY);
@@ -147,11 +147,6 @@ impl RelativePath {
         self.components.len() <= 1
     }
 
-    /// Whether this path names something below `ancestor`, excluding `ancestor` itself.
-    pub(crate) fn is_inside(&self, ancestor: &Self) -> bool {
-        ancestor.components.len() < self.components.len() && self.components.starts_with(&ancestor.components)
-    }
-
     /// Opens the directory that holds the final component, and returns it with that component.
     ///
     /// For the shared directory itself, the directory is the root and the component is `.`.
@@ -160,8 +155,21 @@ impl RelativePath {
             return Ok((root.directory.try_clone().map_err(io_to_errno)?, "."));
         };
 
-        let parent = open_directories(root, parents)?;
+        let parent = open_directories(root, parents, None)?;
         Ok((parent, file_name))
+    }
+
+    /// Like [`Self::open_parent`], and also returns the status of each directory opened on the way, from the shared directory down to the one returned.
+    ///
+    /// The shared directory itself lies in no directory, so for it the list is empty.
+    pub(crate) fn open_parent_with_ancestors(&self, root: &Root) -> nix::Result<(OwnedFd, &str, Vec<FileStat>)> {
+        let Some((file_name, parents)) = self.components.split_last() else {
+            return Ok((root.directory.try_clone().map_err(io_to_errno)?, ".", Vec::new()));
+        };
+
+        let mut ancestors = Vec::with_capacity(self.components.len());
+        let parent = open_directories(root, parents, Some(&mut ancestors))?;
+        Ok((parent, file_name, ancestors))
     }
 }
 
@@ -169,10 +177,20 @@ impl RelativePath {
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct InvalidPath;
 
-fn open_directories(root: &Root, components: &[String]) -> nix::Result<OwnedFd> {
+fn open_directories(
+    root: &Root,
+    components: &[String],
+    mut ancestors: Option<&mut Vec<FileStat>>,
+) -> nix::Result<OwnedFd> {
     let mut directory = root.directory.try_clone().map_err(io_to_errno)?;
+    if let Some(ancestors) = &mut ancestors {
+        ancestors.push(fstat(directory.as_fd())?);
+    }
     for component in components {
         directory = root.open_at(directory.as_fd(), component, DIRECTORY_FLAGS, Mode::empty())?;
+        if let Some(ancestors) = &mut ancestors {
+            ancestors.push(fstat(directory.as_fd())?);
+        }
     }
     Ok(directory)
 }

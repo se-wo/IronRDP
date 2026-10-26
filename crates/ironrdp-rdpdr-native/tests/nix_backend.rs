@@ -680,6 +680,64 @@ fn a_directory_holding_open_files_cannot_be_renamed() {
     assert!(fixture.share.join("dir").join("open.txt").exists());
 }
 
+/// The open files are found by the directory that holds them, not by the paths they were opened by.
+// oracle: spec MS-FSA §2.1.5.15.12
+#[test]
+fn a_directory_holding_open_files_cannot_be_renamed_after_a_local_rename() {
+    let fixture = Fixture::new();
+    std::fs::create_dir(fixture.share.join("dir")).expect("create directory");
+    std::fs::write(fixture.share.join("dir").join("open.txt"), b"open").expect("write file");
+    let mut backend = fixture.backend();
+    let _file_id = create(&mut backend, r"\dir\open.txt", CreateDisposition::FILE_OPEN);
+    std::fs::rename(fixture.share.join("dir"), fixture.share.join("renamed")).expect("rename locally");
+    let directory_id = create(&mut backend, r"\renamed", CreateDisposition::FILE_OPEN);
+
+    let response = set_information(&mut backend, directory_id, rename_to(r"\moved", false));
+
+    assert_eq!(response_status(&response), NtStatus::ACCESS_DENIED);
+    assert!(fixture.share.join("renamed").join("open.txt").exists());
+}
+
+// oracle: spec MS-FSA §2.1.5.15.12
+#[test]
+fn a_directory_holding_a_file_renamed_into_it_cannot_be_renamed() {
+    let fixture = Fixture::new();
+    std::fs::create_dir(fixture.share.join("a")).expect("create directory");
+    std::fs::create_dir(fixture.share.join("b")).expect("create directory");
+    std::fs::write(fixture.share.join("a").join("open.txt"), b"open").expect("write file");
+    let mut backend = fixture.backend();
+    let file_id = create(&mut backend, r"\a\open.txt", CreateDisposition::FILE_OPEN);
+    let response = set_information(&mut backend, file_id, rename_to(r"\b\open.txt", false));
+    assert_eq!(response_status(&response), NtStatus::SUCCESS);
+    let directory_id = create(&mut backend, r"\b", CreateDisposition::FILE_OPEN);
+
+    let response = set_information(&mut backend, directory_id, rename_to(r"\moved", false));
+
+    assert_eq!(response_status(&response), NtStatus::ACCESS_DENIED);
+    assert!(fixture.share.join("b").join("open.txt").exists());
+}
+
+/// On a case-insensitive filesystem, a file opened under another spelling of its directory still keeps that directory from being renamed.
+// oracle: spec MS-FSA §2.1.5.15.12
+#[cfg(target_os = "macos")]
+#[test]
+fn a_directory_holding_files_open_under_another_spelling_cannot_be_renamed() {
+    let fixture = Fixture::new();
+    std::fs::create_dir(fixture.share.join("dir")).expect("create directory");
+    std::fs::write(fixture.share.join("dir").join("open.txt"), b"open").expect("write file");
+    assert!(
+        fixture.share.join("DIR").exists(),
+        "the share must be on a case-insensitive filesystem"
+    );
+    let mut backend = fixture.backend();
+    let _file_id = create(&mut backend, r"\DIR\open.txt", CreateDisposition::FILE_OPEN);
+    let directory_id = create(&mut backend, r"\dir", CreateDisposition::FILE_OPEN);
+
+    let response = set_information(&mut backend, directory_id, rename_to(r"\moved", false));
+
+    assert_eq!(response_status(&response), NtStatus::ACCESS_DENIED);
+}
+
 // oracle: spec MS-FSA §2.1.5.15.12
 #[test]
 fn an_open_directory_without_open_files_can_be_renamed() {
