@@ -688,10 +688,10 @@ fn rename_onto_a_link_differing_only_in_case_removes_the_source() {
 #[cfg(target_os = "macos")]
 #[test]
 fn rename_to_another_normalization_of_the_name_keeps_the_file() {
-    let decomposed = "cafe\u{301}.txt";
-    let composed = "caf\u{e9}.txt";
+    let decomposed = "e\u{301}.txt";
+    let composed = "\u{e9}.txt";
     let fixture = Fixture::new();
-    std::fs::write(fixture.share.join(decomposed), b"coffee").expect("write file");
+    std::fs::write(fixture.share.join(decomposed), b"accented").expect("write file");
     assert!(
         fixture.share.join(composed).exists(),
         "the share must be on a normalization-insensitive filesystem"
@@ -704,7 +704,7 @@ fn rename_to_another_normalization_of_the_name_keeps_the_file() {
     assert_eq!(response_status(&response), NtStatus::SUCCESS);
     assert_eq!(
         std::fs::read(fixture.share.join(composed)).expect("read file"),
-        b"coffee"
+        b"accented"
     );
 }
 
