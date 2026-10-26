@@ -1130,12 +1130,14 @@ pub(crate) fn query_directory(
             // An initial query restarts enumeration, so a failed or single-entry query must not resume an earlier listing.
             open_file.listing = None;
             match RelativePath::parse_query(&req_inner.path) {
-                Ok((directory, pattern)) => start_query(&backend.file_base, open_file, &directory, pattern)
-                    .unwrap_or_else(|error| {
+                // Only a missing name or an empty listing is no match; any other error is reported, so the server does not take it for an empty directory.
+                Ok((directory, pattern)) => match start_query(&backend.file_base, open_file, &directory, pattern) {
+                    Ok(entry) => entry.ok_or(NtStatus::NO_SUCH_FILE),
+                    Err(error) => {
                         trace!(%error, "Initial query directory failed");
-                        None
-                    })
-                    .ok_or(NtStatus::NO_SUCH_FILE),
+                        Err(status_from_errno(error))
+                    }
+                },
                 Err(InvalidPath) => {
                     warn!(path = ?req_inner.path, "Rejected a query path outside the shared directory");
                     Err(NtStatus::OBJECT_NAME_INVALID)

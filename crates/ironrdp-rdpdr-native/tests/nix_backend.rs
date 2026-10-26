@@ -132,6 +132,20 @@ fn query_directory_refuses_an_invalid_pattern(#[case] path: &str) {
     assert_eq!(response_status(&response), NtStatus::OBJECT_NAME_INVALID);
 }
 
+/// An initial query that cannot open its directory reports why, rather than an empty match.
+// oracle: reference crates/ironrdp-rdpdr-native/src/windows/directory.rs
+#[test]
+fn an_initial_query_through_a_file_reports_it_is_not_a_directory() {
+    let fixture = Fixture::new();
+    std::fs::write(fixture.share.join("file.txt"), b"file").expect("write file");
+    let mut backend = fixture.backend();
+    let root_id = create(&mut backend, r"\", CreateDisposition::FILE_OPEN);
+
+    let response = query_directory(&mut backend, root_id, r"\file.txt\*", true);
+
+    assert_eq!(response_status(&response), NtStatus::NOT_A_DIRECTORY);
+}
+
 /// Opening a FIFO without a writer must not block, because a blocked open stalls the whole channel.
 // oracle: mutant open without O_NONBLOCK
 #[test]
