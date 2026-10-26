@@ -168,7 +168,7 @@ fn rename_cannot_move_a_file_outside_the_share() {
 
     let response = set_information(&mut backend, file_id, rename_to(r"\..\moved.txt", false));
 
-    // oracle: spec MS-FSA §2.1.5.15.12
+    // oracle: reference crates/ironrdp-rdpdr-native/src/windows/status.rs
     assert_eq!(response_status(&response), NtStatus::OBJECT_NAME_INVALID);
     assert!(fixture.share.join("inside.txt").exists());
     assert!(!fixture.sandbox.join("moved.txt").exists());
@@ -210,12 +210,14 @@ fn reads_longer_than_the_limit_are_rejected(#[case] length: u32, #[case] status:
 
 // oracle: spec MS-FSA §2.1.5.1
 #[rstest]
+// oracle: spec MS-FSA §2.1.5.1.2
 #[case::existing_file_with_create(
     r"\file.txt",
     CreateOptions::empty(),
     CreateDisposition::FILE_CREATE,
     NtStatus::OBJECT_NAME_COLLISION
 )]
+// oracle: spec MS-FSA §2.1.5.1.2
 #[case::existing_directory_with_create(
     r"\dir",
     CreateOptions::empty(),
@@ -324,6 +326,7 @@ fn file_lifecycle_inside_a_subdirectory() {
             write_data: b"hello".to_vec(),
         }))
         .expect("complete write");
+    // oracle: spec MS-FSA §2.1.5.4
     assert_eq!(response_status(&response), NtStatus::SUCCESS);
 
     // oracle: spec MS-FSA §2.1.5.15.12
@@ -340,7 +343,8 @@ fn file_lifecycle_inside_a_subdirectory() {
     assert!(!renamed.exists());
 }
 
-// oracle: spec MS-FSA §2.1.5.6.3
+// MS-FSA §2.1.5.6.3 omits `.` and `..` for a pattern that matches ".", as `*` does, but Windows lists them.
+// oracle: reference crates/ironrdp-rdpdr-native/src/windows/directory.rs
 #[test]
 fn a_subdirectory_lists_dot_entries_first() {
     let fixture = Fixture::new();
@@ -392,7 +396,7 @@ fn a_failed_initial_query_restarts_enumeration() {
     assert_eq!(response_status(&next), NtStatus::NO_MORE_FILES);
 }
 
-// oracle: spec MS-FSA §2.1.5.1.2
+// oracle: spec MS-SMB2 §2.2.14
 #[test]
 fn supersede_replaces_the_contents() {
     let fixture = Fixture::new();
@@ -470,7 +474,9 @@ fn rename_onto_the_same_file_is_not_a_collision() {
     assert!(fixture.share.join("same.txt").exists());
 }
 
-// oracle: spec MS-FSA §2.1.5.1
+// oracle: mutant missing rename target directory reported as a missing file
+// No source decides this status: MS-FSA §2.1.5.15.12 read literally, and the Windows backend, report STATUS_OBJECT_NAME_NOT_FOUND.
+// STATUS_OBJECT_PATH_NOT_FOUND is kept to match a create below a missing directory.
 #[test]
 fn rename_into_a_missing_directory_reports_the_path() {
     let fixture = Fixture::new();
@@ -496,7 +502,8 @@ fn a_file_marked_for_deletion_cannot_be_renamed() {
     assert_eq!(response_status(&response), NtStatus::ACCESS_DENIED);
 }
 
-// oracle: spec MS-FSA §2.1.5.5
+// MS-FSA §2.1.5.15.12 moves only the renaming handle to the new link, but Windows deletes the renamed file.
+// oracle: reference crates/ironrdp-rdpdr-native/src/windows/file.rs
 #[test]
 fn delete_on_close_follows_a_rename_through_another_handle() {
     let fixture = Fixture::new();
@@ -617,12 +624,13 @@ fn rename_never_moves_a_file_that_replaced_the_handle_name() {
 
     let response = set_information(&mut backend, file_id, rename_to(r"\renamed.txt", false));
 
-    assert_ne!(response_status(&response), NtStatus::SUCCESS);
     assert_eq!(
         std::fs::read(fixture.share.join("doc.txt")).expect("read replacement"),
         b"replacement"
     );
-    assert!(!fixture.share.join("renamed.txt").exists());
+    // MS-FSA would rename the handle's file, which no longer has a name the backend can reach.
+    // oracle: mutant rename reports success without moving the handle's file
+    assert_ne!(response_status(&response), NtStatus::SUCCESS);
 }
 
 // oracle: spec MS-FSA §2.1.5.12.27
@@ -701,7 +709,7 @@ fn a_delete_removes_the_hard_link_it_was_marked_through() {
 }
 
 /// On a case-insensitive filesystem, a handle opened under another spelling of the renamed name follows the rename.
-// oracle: spec MS-FSA §2.1.5.15.3
+// oracle: reference crates/ironrdp-rdpdr-native/src/windows/file.rs
 #[cfg(target_os = "macos")]
 #[test]
 fn a_handle_opened_under_another_spelling_follows_a_rename() {
@@ -724,7 +732,7 @@ fn a_handle_opened_under_another_spelling_follows_a_rename() {
     assert!(!fixture.share.join("renamed.txt").exists());
 }
 
-// oracle: spec MS-FSA §2.1.5.1
+// oracle: spec MS-FSA §2.1.5.5
 #[test]
 fn a_file_marked_for_deletion_is_deleted_when_its_last_handle_closes() {
     let fixture = Fixture::new();
@@ -742,12 +750,14 @@ fn a_file_marked_for_deletion_is_deleted_when_its_last_handle_closes() {
     let still_there = fixture.share.join("shared.txt").exists();
     close(&mut backend, second_id);
 
+    // MS-FSA §2.1.5.1 refuses only the directories on the path, but Windows also refuses the marked file itself.
+    // oracle: reference crates/ironrdp-rdpdr-native/src/windows/file.rs
     assert_eq!(response_status(&reopen), NtStatus::DELETE_PENDING);
     assert!(still_there);
     assert!(!fixture.share.join("shared.txt").exists());
 }
 
-// oracle: spec MS-FSA §2.1.5.1.2
+// oracle: reference crates/ironrdp-rdpdr-native/src/windows/file.rs
 #[rstest]
 fn overwriting_a_file_marked_for_deletion_keeps_its_contents(
     #[values(
@@ -929,7 +939,8 @@ fn nothing_can_be_created_in_a_directory_marked_for_deletion(
 }
 
 /// A rename opens its target directory like a create does, so it cannot move a file into a directory marked for deletion.
-// oracle: spec MS-FSA §2.1.5.15.12
+// The target directory is the last component of that open, which MS-FSA §2.1.5.1 does not refuse, but Windows does.
+// oracle: reference crates/ironrdp-rdpdr-native/src/windows/file.rs
 #[test]
 fn nothing_can_be_renamed_into_a_directory_marked_for_deletion() {
     let fixture = Fixture::new();

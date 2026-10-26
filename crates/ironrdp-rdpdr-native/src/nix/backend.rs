@@ -1323,7 +1323,7 @@ fn open_file(
         })?;
     let stat = fstat(file.as_fd()).map_err(status_from_errno)?;
     let identity = FileIdentity::of(&stat);
-    // [MS-FSA] 2.1.5.1 Server Requests an Open of a File refuses a file marked for deletion.
+    // Windows refuses to open a file marked for deletion, where [MS-FSA] 2.1.5.1 Server Requests an Open of a File states this only for the directories on the path.
     if pending_deletes.contains_key(&identity) {
         return Err(NtStatus::DELETE_PENDING);
     }
