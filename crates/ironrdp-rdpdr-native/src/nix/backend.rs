@@ -125,8 +125,13 @@ impl DirectoryListing {
             if matches!(name.to_bytes(), b"." | b"..") {
                 continue;
             }
-            let Ok(stat) = fstatat(self.directory.as_fd(), name, AtFlags::AT_SYMLINK_NOFOLLOW) else {
-                continue;
+            // UNTESTED: only an entry removed since enumeration started is skipped, and any other error fails the listing.
+            // Skipping an entry that cannot be inspected, as in a directory the process may not search, would make the directory look empty, so a delete could be marked on it.
+            // The tests can run as root, which no permission stops, so after changing this, check that only ENOENT is skipped.
+            let stat = match fstatat(self.directory.as_fd(), name, AtFlags::AT_SYMLINK_NOFOLLOW) {
+                Ok(stat) => stat,
+                Err(Errno::ENOENT) => continue,
+                Err(error) => return Err(error),
             };
             return Ok(Some(DirectoryEntry {
                 name: name.to_string_lossy().into_owned(),
