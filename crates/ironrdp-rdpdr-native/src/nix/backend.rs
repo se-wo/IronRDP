@@ -962,6 +962,10 @@ fn set_delete_pending(
         pending_deletes.remove(&open_file.identity);
         return Ok(());
     }
+    // The shared directory cannot be removed through the share, and a mark on it would refuse every create in it until its handles close.
+    if open_file.path.file_name().is_none() {
+        return Err(Errno::EACCES);
+    }
     if is_directory(&fstat(open_file.file.as_fd())?) {
         // The open directory itself is read, not whatever its path names now.
         // A duplicate of the handle would share its read position, so a second mark would read on from the end of the first.

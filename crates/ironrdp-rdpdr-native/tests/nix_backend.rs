@@ -744,6 +744,24 @@ fn a_directory_counts_one_link(#[case] marked: bool, #[case] links: u32) {
     );
 }
 
+/// The shared directory cannot be removed through the share, so it is never marked, and creates in it keep working.
+// oracle: mutant marking the shared directory blocks every create in it
+#[test]
+fn the_shared_directory_cannot_be_marked_for_deletion() {
+    let fixture = Fixture::new();
+    let mut backend = fixture.backend();
+    let root_id = create(&mut backend, r"\", CreateDisposition::FILE_OPEN);
+
+    let response = set_information(&mut backend, root_id, delete_pending(true));
+    let created = create_with(
+        &mut backend,
+        create_request(r"\new.txt", CreateDisposition::FILE_CREATE),
+    );
+
+    assert_eq!(response_status(&response), NtStatus::ACCESS_DENIED);
+    assert_eq!(response_status(&created), NtStatus::SUCCESS);
+}
+
 /// Dropping the backend closes every handle the server left open, so their pending deletes run.
 // oracle: spec MS-FSA §2.1.5.5
 #[test]
