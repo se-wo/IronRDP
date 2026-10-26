@@ -739,6 +739,16 @@ pub(crate) fn set_information(
                     .values()
                     .any(|other| other.path.is_inside(&open_file.path))
         });
+    // A rename target that is open cannot be replaced, so the open files are collected before one of them is borrowed mutably.
+    let open_identities = if matches!(req_inner.set_buffer, FileInformationClass::Rename(_)) {
+        backend
+            .open_files
+            .values()
+            .map(|open_file| open_file.identity)
+            .collect()
+    } else {
+        HashSet::new()
+    };
     let mut renamed = None;
     let status = match backend.open_files.get_mut(&file_id) {
         Some(open_file) => match &req_inner.set_buffer {
@@ -750,6 +760,7 @@ pub(crate) fn set_information(
                     &to,
                     info.replace_if_exists == Boolean::True,
                     &backend.pending_deletes,
+                    &open_identities,
                 ) {
                     Ok(()) => {
                         renamed = Some((open_file.identity, open_file.path.clone(), to));
@@ -815,7 +826,8 @@ pub(crate) fn set_information(
 /// Renames the file `open_file` holds to `to` ([MS-FSA] 2.1.5.15.12 FileRenameInformation).
 ///
 /// The handle's path is resolved again, so it fails with STATUS_NO_SUCH_FILE once that name refers to another file than the handle's.
-/// An existing `to` is a collision unless `replace_if_exists` is set, and a directory `to` is never replaced.
+/// An existing `to` is a collision unless `replace_if_exists` is set.
+/// A directory `to`, or one with open handles, is never replaced, and one marked for deletion fails with STATUS_DELETE_PENDING.
 /// A `to` naming the source itself, as a case-only rename on a case-insensitive filesystem does, is not a collision, and a `to` naming another hard link of the source removes the source link.
 /// The existence check and the rename are separate calls, so a local process creating `to` in between is overwritten.
 /// The target directory is opened as a create opens it, so a directory marked for deletion is refused with STATUS_DELETE_PENDING.
@@ -827,6 +839,7 @@ fn rename(
     to: &RelativePath,
     replace_if_exists: bool,
     pending_deletes: &HashMap<FileIdentity, RelativePath>,
+    open_identities: &HashSet<FileIdentity>,
 ) -> Result<(), NtStatus> {
     let root = Root::open(file_base).map_err(status_from_errno)?;
     let (from_parent, from_name) = open_file.path.open_parent(&root).map_err(status_from_parent_errno)?;
@@ -852,6 +865,10 @@ fn rename(
         }
         Ok(_) if !replace_if_exists => return Err(NtStatus::OBJECT_NAME_COLLISION),
         Ok(target) if is_directory(&target) => return Err(NtStatus::ACCESS_DENIED),
+        Ok(target) if pending_deletes.contains_key(&FileIdentity::of(&target)) => {
+            return Err(NtStatus::DELETE_PENDING);
+        }
+        Ok(target) if open_identities.contains(&FileIdentity::of(&target)) => return Err(NtStatus::ACCESS_DENIED),
         Ok(_) | Err(Errno::ENOENT) => {}
         Err(error) => return Err(status_from_errno(error)),
     }

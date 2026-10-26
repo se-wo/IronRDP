@@ -466,6 +466,47 @@ fn renaming_a_hard_link_does_not_move_handles_opened_through_another_link() {
     );
 }
 
+// oracle: spec MS-FSA §2.1.5.15.12
+#[test]
+fn rename_with_replace_refuses_a_target_marked_for_deletion() {
+    let fixture = Fixture::new();
+    std::fs::write(fixture.share.join("target.txt"), b"old").expect("write target");
+    std::fs::write(fixture.share.join("source.txt"), b"new").expect("write source");
+    let mut backend = fixture.backend();
+    let target_id = create(&mut backend, r"\target.txt", CreateDisposition::FILE_OPEN);
+    let _ = set_information(&mut backend, target_id, delete_pending(true));
+    let source_id = create(&mut backend, r"\source.txt", CreateDisposition::FILE_OPEN);
+
+    let response = set_information(&mut backend, source_id, rename_to(r"\target.txt", true));
+
+    assert_eq!(response_status(&response), NtStatus::DELETE_PENDING);
+    assert_eq!(
+        std::fs::read(fixture.share.join("target.txt")).expect("read target"),
+        b"old"
+    );
+    assert!(fixture.share.join("source.txt").exists());
+}
+
+// oracle: spec MS-FSA §2.1.5.15.12
+#[test]
+fn rename_with_replace_refuses_a_target_with_open_handles() {
+    let fixture = Fixture::new();
+    std::fs::write(fixture.share.join("target.txt"), b"old").expect("write target");
+    std::fs::write(fixture.share.join("source.txt"), b"new").expect("write source");
+    let mut backend = fixture.backend();
+    let _target_id = create(&mut backend, r"\target.txt", CreateDisposition::FILE_OPEN);
+    let source_id = create(&mut backend, r"\source.txt", CreateDisposition::FILE_OPEN);
+
+    let response = set_information(&mut backend, source_id, rename_to(r"\target.txt", true));
+
+    assert_eq!(response_status(&response), NtStatus::ACCESS_DENIED);
+    assert_eq!(
+        std::fs::read(fixture.share.join("target.txt")).expect("read target"),
+        b"old"
+    );
+    assert!(fixture.share.join("source.txt").exists());
+}
+
 /// Renaming onto another hard link of the same file removes the source link, where POSIX rename changes nothing.
 // oracle: spec MS-FSA §2.1.5.15.12
 #[test]
