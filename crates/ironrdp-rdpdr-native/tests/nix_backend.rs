@@ -10,8 +10,9 @@ use ironrdp_rdpdr::RdpdrBackend;
 use ironrdp_rdpdr::pdu::efs::{
     Boolean, CreateDisposition, CreateOptions, DesiredAccess, DeviceCloseRequest, DeviceCreateRequest, DeviceIoRequest,
     DeviceReadRequest, DeviceWriteRequest, FileAttributes, FileDispositionInformation, FileInformationClass,
-    FileInformationClassLevel, FileRenameInformation, MajorFunction, MinorFunction, NtStatus, ServerDriveIoRequest,
-    ServerDriveQueryDirectoryRequest, ServerDriveSetInformationRequest, SharedAccess,
+    FileInformationClassLevel, FileRenameInformation, FileStandardInformation, MajorFunction, MinorFunction, NtStatus,
+    ServerDriveIoRequest, ServerDriveQueryDirectoryRequest, ServerDriveQueryInformationRequest,
+    ServerDriveSetInformationRequest, SharedAccess,
 };
 use ironrdp_rdpdr_native::backend::NixRdpdrBackend;
 use ironrdp_svc::SvcMessage;
@@ -624,6 +625,22 @@ fn rename_never_moves_a_file_that_replaced_the_handle_name() {
     assert!(!fixture.share.join("renamed.txt").exists());
 }
 
+// oracle: spec MS-FSA §2.1.5.12.27
+#[test]
+fn a_link_marked_for_deletion_is_not_counted() {
+    let fixture = Fixture::new();
+    std::fs::write(fixture.share.join("a.txt"), b"linked").expect("write file");
+    std::fs::hard_link(fixture.share.join("a.txt"), fixture.share.join("b.txt")).expect("link file");
+    let mut backend = fixture.backend();
+    let file_id = create(&mut backend, r"\a.txt", CreateDisposition::FILE_OPEN);
+    let _ = set_information(&mut backend, file_id, delete_pending(true));
+
+    let information = query_standard_information(&mut backend, file_id);
+
+    assert_eq!(information.number_of_links, 1);
+    assert_eq!(information.delete_pending, Boolean::True);
+}
+
 /// Dropping the backend closes every handle the server left open, so their pending deletes run.
 // oracle: spec MS-FSA §2.1.5.5
 #[test]
@@ -1010,6 +1027,32 @@ fn list_directory(backend: &mut NixRdpdrBackend, file_id: u32, pattern: &str) ->
     (names, response_status(&response))
 }
 
+fn query_standard_information(backend: &mut NixRdpdrBackend, file_id: u32) -> FileStandardInformation {
+    let response = backend
+        .handle_drive_io_request(ServerDriveIoRequest::ServerDriveQueryInformationRequest(
+            ServerDriveQueryInformationRequest {
+                device_io_request: request_header(file_id, MajorFunction::QueryInformation),
+                file_info_class_lvl: FileInformationClassLevel::FILE_STANDARD_INFORMATION,
+            },
+        ))
+        .expect("complete query information");
+    assert_eq!(response_status(&response), NtStatus::SUCCESS);
+    let response = response[0]
+        .encode_unframed_pdu()
+        .expect("encode query information response");
+    let buffer = &response[INFORMATION_BUFFER..];
+    let information = FileInformationClass::decode(
+        FileInformationClassLevel::FILE_STANDARD_INFORMATION,
+        buffer.len(),
+        &mut ReadCursor::new(buffer),
+    )
+    .expect("decode FileStandardInformation");
+    let FileInformationClass::Standard(information) = information else {
+        panic!("expected FileStandardInformation, got {information:?}");
+    };
+    information
+}
+
 fn create_with(backend: &mut NixRdpdrBackend, request: DeviceCreateRequest) -> Vec<SvcMessage> {
     backend
         .handle_drive_io_request(ServerDriveIoRequest::ServerCreateDriveRequest(request))
@@ -1085,6 +1128,9 @@ const CREATE_FILE_ID: Range<usize> = 16..20;
 // [MS-RDPEFS] 2.2.3.4.10 Client Drive Query Directory Response (DR_DRIVE_QUERY_DIRECTORY_RSP) continues with Length
 // and the entry it describes.
 const DIRECTORY_ENTRY: usize = 20;
+// [MS-RDPEFS] 2.2.3.4.8 Client Drive Query Information Response (DR_DRIVE_QUERY_INFORMATION_RSP) continues with Length
+// and the information it describes.
+const INFORMATION_BUFFER: usize = 20;
 
 fn response_status(messages: &[SvcMessage]) -> NtStatus {
     NtStatus::from(read_u32(messages, IO_STATUS))
